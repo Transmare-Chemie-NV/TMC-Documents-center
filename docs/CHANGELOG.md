@@ -1,5 +1,13 @@
 # Changelog
 
+## 26/11/2026 · Phase 4b: scanned COA reader, wrapped-cell AI check, editor fit-zoom, Azure auto-deploy (PR #2, merged 26/11, Willem ok; security gate 100/100 per PR)
+- Worker OCR: `ocrmypdf` always found on Azure (`PATH` in Docker and `worker/engine.ts`), bounded fallback for searchable copies.
+- Scanned bordered COA tables read by `engine/scripts/scan_grid.py` (grid lines, supplier and signatory rows dropped, hard rule 3); `OBSERVATIONS` and `FINDINGS` headers.
+- Wrapped-cell checks in the provenance gate (`build_word_index`, `match_column_boxes`) and `ai_reader.verify()`: one row band across all 5 cells; the gate checks every output cell against the raw PDF words, no self-whitelisting (hard rules 1-3).
+- Check screen: A4 page fits the right panel, `Zoom: Fit / 100%` toggle.
+- `.github/workflows/deploy-azure.yml`: after `checks` succeeds on `main`, builds both images, updates `tmc-doccenter-worker` then `tmc-doccenter-web` by digest, verifies `/api/v1/health`. Environment `azure-production`, setup in `docs/AZURE.md`.
+- Tests: `engine/tests/test_scan_grid_and_wrapped_ai.py` (15).
+
 ## 26/11/2026 · Phase 4b: Scanned COA OCR/grid fixes, wrapped AI cell verification, editor fit-zoom & Azure OIDC auto-deploy (branch `phase-4b-coa-scan-ai-deploy`; security gate 63 -> 100/100 Approve, 0 open findings)
 - Worker OCR fix: added `/opt/engine/bin` to `PATH` in `web/worker/Dockerfile` and `web/worker/engine.ts`, fixed `_find_ocrmypdf()` in `engine/scripts/neutralize_docx.py` to locate `ocrmypdf` beside the venv symlink without `.resolve()`, and added a bounded `ocr_prep.searchable_copy()` fallback (`max_pages=15`, `total_timeout_s=180`, safe pixel cap) before raw `pytesseract`. Scanned COAs on Azure now always get deskewed searchable PDFs with word coordinates.
 - Hardcoded COA table reader: added `OBSERVATIONS` / `FINDINGS` to result headers, guarded `_build_test_row()` against bare serial numbers and supplier/signatory leakage across all 5 cells, added deterministic scanned bordered-table grid extraction (`engine/scripts/scan_grid.py`, using `pymupdf` + `numpy`, safe render-pixel caps, and interior vertical-divider clipping so outer page frames never pull letterhead or footers into the table; Hard Rule 3), and handled vertically merged sub-rows (e.g. `Related Substances by HPLC` sub-impurities) while dropping identity/signatory rows cleanly.
