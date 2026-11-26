@@ -64,9 +64,12 @@ export function runPython(
   workDir: string,
   opts: { keepStdout?: boolean; env?: Record<string, string> } = {},
 ): Promise<EngineRun> {
+  const basePath = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+  const pyBin = path.isAbsolute(PYTHON) ? path.dirname(PYTHON) : "";
+  const childPath = pyBin && !basePath.split(path.delimiter).includes(pyBin) ? `${pyBin}${path.delimiter}${basePath}` : basePath;
   const env = {
     ...opts.env,
-    PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    PATH: childPath,
     HOME: workDir,
     TMPDIR: workDir,
     LANG: "C.UTF-8",

@@ -59,25 +59,41 @@ _OCR_THRESHOLD = 80
 def _is_text_sparse(text):
     return len(text.strip()) < _OCR_THRESHOLD
 
+def _find_ocrmypdf():
+    """Locate ocrmypdf in the active Python venv first (Docker /opt/engine/bin), then PATH."""
+    # Do NOT call .resolve() on sys.executable: in a venv it is a symlink to /usr/bin/python3,
+    # while ocrmypdf sits beside the venv symlink itself (/opt/engine/bin/ocrmypdf).
+    sibling = Path(sys.executable).parent / ("ocrmypdf.exe" if os.name == "nt" else "ocrmypdf")
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return str(sibling)
+    return shutil.which("ocrmypdf")
+
+
 def _ocr_to_searchable_pdf(path):
-    lo_bin = shutil.which("ocrmypdf")
-    if not lo_bin:
-        return None
-    tmp = tempfile.mktemp(suffix="_ocr.pdf", prefix="tmc_ocr_")
+    lo_bin = _find_ocrmypdf()
+    safe_in = os.path.abspath(path)
+    if lo_bin:
+        fd, tmp = tempfile.mkstemp(suffix="_ocr.pdf", prefix="tmc_ocr_")
+        os.close(fd)
+        try:
+            r = subprocess.run(
+                [lo_bin, "--skip-text", "--rotate-pages", "--deskew",
+                 "--optimize", "0", "--jobs", "2", "--output-type", "pdf", safe_in, tmp],
+                capture_output=True, timeout=180)
+            if r.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
+                return tmp
+        except Exception:
+            pass
+        try:
+            if os.path.exists(tmp): os.remove(tmp)
+        except OSError:
+            pass
+    # Fallback: tesseract searchable PDF via ocr_prep (still gives word coordinates + layout text)
     try:
-        r = subprocess.run(
-            [lo_bin, "--skip-text", "--rotate-pages", "--deskew",
-             "--optimize", "0", "--jobs", "2", "--output-type", "pdf", path, tmp],
-            capture_output=True, timeout=180)
-        if r.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
-            return tmp
+        import ocr_prep
+        return ocr_prep.searchable_copy(safe_in, dpi=300, psm="6", clean=True)
     except Exception:
-        pass
-    try:
-        if os.path.exists(tmp): os.remove(tmp)
-    except OSError:
-        pass
-    return None
+        return None
 
 def _ocr_to_text_pytesseract(path):
     try:
@@ -173,14 +189,16 @@ atexit.register(_cleanup_repaired)
 
 def _extract_pdf_raw(path):
     pages, tables, layout, words = [], [], [], []
-    with pdfplumber.open(_repair_pdf(path)) as pdf:
+    repaired = _repair_pdf(path)
+    with pdfplumber.open(repaired) as pdf:
         for i, page in enumerate(pdf.pages):
             text = page.extract_text() or ""
             pages.append({"page": i+1, "text": text})
-            # word positions: a numbered free-text table is read by column position, where the
-            # layout text cannot tell two touching columns apart (04/11/2026, real scanned COA)
+            # word positions: a numbered free-text table or scanned bordered grid is read by
+            # column/cell position where linear text interleaves wrapped columns
             try:
-                words += [{"page": i + 1, "text": w["text"], "x0": w["x0"], "x1": w["x1"], "top": w["top"]}
+                words += [{"page": i + 1, "text": w["text"], "x0": w["x0"], "x1": w["x1"],
+                           "top": w["top"], "bottom": w["bottom"]}
                           for w in page.extract_words()]
             except Exception:
                 pass
@@ -193,6 +211,17 @@ def _extract_pdf_raw(path):
             for tbl in (page.extract_tables() or []):
                 if tbl:
                     tables.append({"page": i+1, "rows": tbl})
+    # Scanned bordered tables have pixel grid lines rather than PDF vector lines: recover them
+    # deterministically from the rendered page image + OCR word boxes (26/11/2026).
+    if words:
+        try:
+            import scan_grid
+            existing_pages = {t["page"] for t in tables}
+            grid_tables = scan_grid.extract_scan_grid_tables(repaired, words, existing_pages)
+            if grid_tables:
+                tables.extend(grid_tables)
+        except Exception:
+            pass
     return {"source": path, "pages": pages, "tables": tables,
             "full_text": "\n".join(p["text"] for p in pages),
             "layout_text": "\n".join(layout), "words": words}
@@ -266,6 +295,7 @@ _HDR_SETS = {
         "measured","test result","test results","found value",
         "measured value","analyse result","analysis result","reported value",
         "detected amount","detected value","amount detected",
+        "observation","observations","finding","findings",
         "resultaat","résultat","ergebnis","waarde","gevonden",
     },
     "spec": {
@@ -341,8 +371,9 @@ def _build_test_row(cells, col_map):
     param  = get("param")
     if not param and col_map.get("param"):
         # merged cells: the header is shifted one column right of its rows (20/10/2026,
-        # a real COA's "Additional" table) -- the name is the first cell to the left
-        param = next((c.strip() for c in reversed(cells[:col_map["param"]]) if c.strip()), "")
+        # a real COA's "Additional" table) -- the name is the first non-number cell to the left
+        param = next((c.strip() for c in reversed(cells[:col_map["param"]])
+                      if c.strip() and not re.fullmatch(r"\d{1,2}\.?", c.strip())), "")
     result = get("result")
     uom    = get("unit")
     method = get("method")
@@ -372,13 +403,14 @@ def _build_test_row(cells, col_map):
 
     p_lower = param.lower()
     skip_starts = ("note:","this product","these results","guaranteed","remarks:","remark:",
-                   "all specifications","the above","tested by","approved by","authorised",
-                   "authorized","certif","the analysis","declaration","per above","the goods",
-                   "all tests","we hereby")
+                   "all specifications","the above","tested by","prepared by","checked by",
+                   "approved by","authorised","authorized","certif","the analysis","declaration",
+                   "per above","the goods","all tests","we hereby","factory","regd","head office")
     if any(p_lower.startswith(s) for s in skip_starts): return None
 
-    # a supplier, lab or address line is never a test row (security review R1, 26/10/2026)
-    if _IDENTITY_PARAM.search(param):
+    # a supplier, lab, signatory, office or contact in ANY cell is never a test row (Rule 3, H-1/M-3)
+    all_row_text = " ".join(v for v in (param, spec, result, uom, method) if v)
+    if _IDENTITY_PARAM.search(param) or _NUM_IDENTITY.search(all_row_text) or _SIGNATORY_OR_OFFICE.search(all_row_text):
         return None
     # a repeated header row: a bare header word, or several header cells, and no digits. A test
     # whose name only holds a header word stays: "Identification (Flame test)" (26/10/2026, real COA)
@@ -491,7 +523,7 @@ def _extract_tests_from_text(full_text):
         ll = line.strip().lower()
         if not ll: continue
         has_param  = any(k in ll for k in ["parameter","characteristic","test","description","analysis"])
-        has_result = any(k in ll for k in ["result","found","value","actual"])
+        has_result = any(k in ll for k in ["result","found","value","actual","observation","finding"])
         has_spec   = any(k in ll for k in ["specification","spec","requirement","limit","standard"])
         if has_param and (has_result or has_spec):
             section_start = i
@@ -587,6 +619,7 @@ def parse_coa_fields(data):
         if hdr_row_idx >= 0:
             for row in rows[:hdr_row_idx]:                     # a heading above the column names
                 if row: _group([_cell_str(c) for c in row])
+            last_param = ""
             for row in rows[hdr_row_idx+1:]:
                 if not row: continue
                 cells   = [_cell_str(c) for c in row]
@@ -598,7 +631,46 @@ def parse_coa_fields(data):
                     if new_map: col_map.update(new_map)
                     continue
                 row_data = _build_test_row(cells, col_map)
-                if row_data: all_test_rows.append(row_data)
+                if row_data:
+                    last_param = row_data[0]
+                    all_test_rows.append(row_data)
+                else:
+                    p_idx = col_map.get("param")
+                    s_idx = col_map.get("spec")
+                    r_idx = col_map.get("result")
+                    p_txt = cells[p_idx].strip() if p_idx is not None and p_idx < len(cells) else ""
+                    s_txt = cells[s_idx].strip() if s_idx is not None and s_idx < len(cells) else ""
+                    r_txt = cells[r_idx].strip() if r_idx is not None and r_idx < len(cells) else ""
+                    if (p_txt and not s_txt and not r_txt
+                            and not _IDENTITY_PARAM.search(p_txt)
+                            and not _NUM_IDENTITY.search(p_txt)
+                            and not _SIGNATORY_OR_OFFICE.search(p_txt)):
+                        # Parent row with no values (e.g. "3 | Identification") above sub-rows A./B.
+                        last_param = p_txt
+                    elif not p_txt and last_param and (r_txt or s_txt):
+                        # Vertically merged parameter cell spanning sub-rows (e.g. Related Substances
+                        # sub-impurities "Unspecified impurities: NMT 0.5% | Not detected.")
+                        joined_cells = " ".join(c for c in cells if c)
+                        if _NUM_IDENTITY.search(joined_cells) or _SIGNATORY_OR_OFFICE.search(joined_cells):
+                            continue
+                        sub_cells = list(cells)
+                        if s_txt and ":" in s_txt and s_idx is not None and p_idx is not None:
+                            head, tail = s_txt.split(":", 1)
+                            head, tail = head.strip(), tail.strip()
+                            if (_IDENTITY_PARAM.search(head) or _NUM_IDENTITY.search(head)
+                                    or _SIGNATORY_OR_OFFICE.search(head)):
+                                # Never fall back to last_param when head is an identity/signatory label (H-1)
+                                continue
+                            if head and tail and len(head) <= 60 and re.match(r"^[A-Za-z]", head):
+                                sub_cells[p_idx] = head
+                                sub_cells[s_idx] = tail
+                            else:
+                                sub_cells[p_idx] = last_param
+                        elif p_idx is not None:
+                            sub_cells[p_idx] = last_param
+                        sub_row = _build_test_row(sub_cells, col_map)
+                        if sub_row:
+                            all_test_rows.append(sub_row)
         else:
             in_test         = False
             current_col_map = dict(_DEFAULT_COL_MAP)
@@ -920,11 +992,18 @@ _NUM_HDR_RESULT = {"observations", "observation", "results", "result", "findings
 # below the tests are never part of a row (security review H1, 04/11/2026)
 _NUM_STOP = re.compile(r"\b(?:remarks?|notes?|prepared|checked|approved|conclusion|for\s+and\s+on\s+behalf"
                        r"|manager|signature|page\s+\d+\s+of)\b", re.I)
-# supplier identity in any cell drops the row, so the gap keeps the table flagged (rule 3, H1)
+# supplier identity in any cell drops the row, so the gap keeps the table flagged (rule 3, H1/M-3)
 _NUM_IDENTITY = re.compile(
     _IDENTITY_PARAM.pattern
-    + r"|(?<!\w)(?:ltd|limited|pvt|gmbh|inc|llc|s\.a\.?|b\.v\.?|co\.|corp|plot|road|street)(?!\w)"
-    r"|\S+@\S+\.\w+|\bwww\.|https?://|\b(?:tel|phone|fax|mob\w*)\b|\+\d[\d ()/.-]{7,}\d", re.I)
+    + r"|(?<!\w)(?:ltd|limited|pvt|gmbh|inc|llc|s\.a\.?|n\.v\.?|b\.v\.?|bv|nv|bvba|sprl|"
+    r"sas|sarl|s\.r\.l\.?|srl|s\.p\.a\.?|pte|plc|mbh|kgaa|co\.|corp|plot|road|street)(?!\w)"
+    r"|\S+@\S+\.\w+|\bwww\.|https?://|\b(?:tel|phone|fax|mob\.?(?:\s*no\.?)?|mobile\s*(?:no\.?|phone|tel))\b"
+    r"|\+\d[\d ()/.-]{7,}\d", re.I)
+_SIGNATORY_OR_OFFICE = re.compile(
+    r"\b(?:prepared\s+by|checked\s+by|approved\s+by|tested\s+by|authori[sz]ed|signature|"
+    r"for\s+and\s+on\s+behalf|regd\.?\s*office|head\s+office|registered\s+office|factory|manager)\b",
+    re.I,
+)
 _NUM_MAX_CONT = 4          # continuation lines one row may take
 _NUM_GAP = 2.5             # a vertical gap this many times the line pitch ends the table
 _numbered_cache = {}
@@ -1512,7 +1591,7 @@ def main():
     print("\nTransmare Document Neutralizer v2 (DOCX)")
     print("=" * 45)
 
-    ocr_available = bool(shutil.which("ocrmypdf"))
+    ocr_available = bool(_find_ocrmypdf())
     try:
         import pytesseract  # noqa
         tess_available = True
@@ -1696,7 +1775,7 @@ def main():
             ai = ai_reader.propose(coa_fields["_source"], needs, _source_texts(src, readings, coa_fields, numbered=False),
                                    coa_fields.get("results_table") or [],
                                    ai_provider, ai_budget, ai_forbid, helpers=sys.modules[__name__],
-                                   on_usage=note_ai_usage)
+                                   on_usage=note_ai_usage, words=src.get("words"))
             if ai.log:
                 print(ai.log)
             ai = ai or None
@@ -1713,6 +1792,7 @@ def main():
         allowed += [r.get("doc_ref", "") for r in ref_docs] + [p.get("name", "") for r in ref_docs for p in r.get("_products", [])]
         try:
             provenance.assert_clean(docx_path, src_texts, allowed, template_path=str(TEMPLATE_DOC),
+                                    source_words=src.get("words"),
                                     on_fail=lambda: Path(docx_path).unlink(missing_ok=True))
             print("  ok  provenance: every string traced to the source or a supplied value")
             # The batch this document is for, so the platform names and files it

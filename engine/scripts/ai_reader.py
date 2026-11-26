@@ -277,16 +277,39 @@ def _helpers():
     return neutralize_docx
 
 
-def verify(data, needs, src_texts, rules_rows, forbid=(), helpers=None):
-    """-> (fields, rows, dropped). Every value must be printed in the source on the quoted line,
-    with the right label and shape; anything else is dropped. The model's answer is untrusted."""
+_SIGNATORY_OR_OFFICE = re.compile(
+    r"\b(?:prepared\s+by|checked\s+by|approved\s+by|tested\s+by|authori[sz]ed|signature|"
+    r"for\s+and\s+on\s+behalf|regd\.?\s*office|head\s+office|registered\s+office|factory|manager)\b",
+    re.I,
+)
+_ROW_ALIGN_TOL_PT = 6.0
+
+
+def verify(data, needs, src_texts, rules_rows, forbid=(), helpers=None, words=None):
+    """-> (fields, rows, dropped). Every value must be printed in the source on the quoted line
+    (or, for wrapped multi-line table cells when `words` are given, inside spatially aligned
+    single-column boxes on ONE concrete row band), with the right label and shape; anything else
+    is dropped. The model's answer is untrusted."""
     h = helpers or _helpers()
     norm = provenance.norm
     corpus = provenance.build_corpus(src_texts)
+    word_index = provenance.build_word_index(words) if words else None
     blocked = [norm(f) for f in forbid if len(norm(f)) >= 3]
     fields, rows, dropped = {}, [], 0
     if not isinstance(data, dict):
         return fields, rows, dropped
+
+    def has_blocked(text):
+        nt = norm(text)
+        return any(b in nt for b in blocked)
+
+    def has_identity_or_signatory(cells):
+        joined = " ".join(c for c in cells if c)
+        if _SIGNATORY_OR_OFFICE.search(joined):
+            return True
+        if hasattr(h, "_NUM_IDENTITY") and h._NUM_IDENTITY.search(joined):
+            return True
+        return False
 
     def clean(value, quote, limit=MAX_VALUE):
         if not (_safe(value, limit) and _safe(quote, MAX_QUOTE)):
@@ -297,6 +320,83 @@ def verify(data, needs, src_texts, rules_rows, forbid=(), helpers=None):
         if any(b in nv or b in nq for b in blocked):       # rule 3: never the supplier's name
             return None
         return value.strip()
+
+    def verify_wrapped_row(cells, quote):
+        """Fallback for multi-line wrapped table rows whose columns were interleaved in linear text.
+        Uses provenance.match_column_boxes directly and requires ALL non-empty cells (param, spec,
+        result, unit, method) to align on ONE concrete (page, row_top, row_bot) anchor (C-1, H-3)."""
+        if not word_index or not _safe(quote, MAX_QUOTE) or has_blocked(quote):
+            return False
+        cell_matches = []
+        for idx, c in enumerate(cells):
+            cs = c.strip()
+            if not cs:
+                cell_matches.append(None)
+                continue
+            if not _safe(cs, MAX_VALUE) or has_blocked(cs):
+                return False
+            nc = norm(cs)
+            if not nc:
+                # Pure symbol (e.g. "%"): verified literally against the anchored row band below
+                cell_matches.append(("symbol", cs))
+                continue
+            col_boxes = provenance.match_column_boxes(nc, word_index)
+            if not col_boxes:
+                return False
+            cell_matches.append(("boxes", col_boxes))
+
+        p_entry, s_entry, r_entry, u_entry, m_entry = cell_matches
+        if not (p_entry and p_entry[0] == "boxes" and r_entry and r_entry[0] == "boxes"):
+            return False
+
+        def overlaps_band(box, page, rtop, rbot):
+            bp, bt, bbot, _bx0, _bx1 = box
+            return bp == page and min(rbot, bbot) + _ROW_ALIGN_TOL_PT >= max(rtop, bt)
+
+        def entry_fits_band(entry, page, rtop, rbot):
+            if entry is None:
+                return True
+            kind, val = entry
+            if kind == "symbol":
+                return provenance.row_band_has_literal(val, page, rtop, rbot, word_index)
+            return any(overlaps_band(b, page, rtop, rbot) for b in val)
+
+        # Find one concrete (page, row_top, row_bot) anchor where param, result, spec, unit, method all sit
+        for pp, pt, pbot, px0, px1 in p_entry[1]:
+            for rp, rt, rbot, rx0, rx1 in r_entry[1]:
+                if rp != pp:
+                    continue
+                # Result must sit in a distinct x-band from parameter (cannot reuse param's own words)
+                if not (rx0 >= px1 - 4.0 or px0 >= rx1 - 4.0):
+                    continue
+                if min(pbot, rbot) + _ROW_ALIGN_TOL_PT < max(pt, rt):
+                    continue
+                anchor_top = min(pt, rt)
+                anchor_bot = max(pbot, rbot)
+
+                # Specification (if present) must overlap this exact row anchor
+                spec_bands = [(anchor_top, anchor_bot)]
+                if s_entry is not None:
+                    if s_entry[0] == "symbol":
+                        if not provenance.row_band_has_literal(s_entry[1], pp, anchor_top, anchor_bot, word_index):
+                            continue
+                    else:
+                        matched_specs = [
+                            (min(anchor_top, st), max(anchor_bot, sbot))
+                            for sp, st, sbot, sx0, sx1 in s_entry[1]
+                            if sp == pp
+                            and min(anchor_bot, sbot) + _ROW_ALIGN_TOL_PT >= max(anchor_top, st)
+                            and not (abs(sx0 - rx0) < 2.0 and abs(sx1 - rx1) < 2.0)
+                        ]
+                        if not matched_specs:
+                            continue
+                        spec_bands = matched_specs
+
+                # Unit and method (if present) must sit on this exact same anchored row band (H-3)
+                for rtop, rbot in spec_bands:
+                    if entry_fits_band(u_entry, pp, rtop, rbot) and entry_fits_band(m_entry, pp, rtop, rbot):
+                        return True
+        return False
 
     def check_field(key, f):
         v = clean(f.get("value"), f.get("quote"))
@@ -334,11 +434,21 @@ def verify(data, needs, src_texts, rules_rows, forbid=(), helpers=None):
                 quote = r.get("quote") or ""
                 cells = [r.get(k) or "" for k in ("parameter", "specification", "result", "unit", "method")]
                 param, result = cells[0].strip(), cells[2].strip()
-                good = bool(param and result) and _safe(quote, MAX_QUOTE) and provenance.traced(norm(quote), corpus)
-                good = good and not h._IDENTITY_PARAM.search(param)
-                # a cell of signs only ("%") has nothing to look up, as in the gate; it must still be clean
-                good = good and all(not c.strip() or (_safe(c, MAX_VALUE) and (not norm(c) or clean(c, quote) is not None))
-                                    for c in cells)
+                good = (
+                    bool(param and result)
+                    and not h._IDENTITY_PARAM.search(param)
+                    and not has_identity_or_signatory(cells)
+                )
+                if good:
+                    # Fast path: entire quote + every cell traced contiguously in linear corpus
+                    linear_ok = (
+                        _safe(quote, MAX_QUOTE)
+                        and provenance.traced(norm(quote), corpus)
+                        and all(not c.strip() or (_safe(c, MAX_VALUE) and (not norm(c) or clean(c, quote) is not None))
+                                for c in cells)
+                    )
+                    if not linear_ok and not verify_wrapped_row(cells, quote):
+                        good = False
             except (AttributeError, TypeError):
                 good = False
             if not good:
@@ -366,7 +476,7 @@ def usage_line(reply, accepted, dropped):
 
 
 def propose(pdf_path, needs, src_texts, rules_rows, provider, budget, forbid=(), helpers=None,
-            on_usage=None, env=os.environ):
+            on_usage=None, env=os.environ, words=None):
     """One call for one supplier COA. Never raises: on any failure the Proposal is empty and the
     rules output stays exactly as it was. Only counts go to the log, never document text.
     `on_usage(record)`: called before the call and again after it, so every attempt is counted
@@ -414,7 +524,7 @@ def propose(pdf_path, needs, src_texts, rules_rows, provider, budget, forbid=(),
         return Proposal(usage=usage, log=usage_line(reply, 0, 0) + f"\n  !  AI reader: no usable answer ({why}); "
                                                                     "the rules result is kept")
     try:
-        fields, rows, dropped = verify(data, needs, src_texts, rules_rows, forbid, helpers)
+        fields, rows, dropped = verify(data, needs, src_texts, rules_rows, forbid, helpers, words=words)
     except Exception as exc:
         return Proposal(usage=usage, log=usage_line(reply, 0, 0) + f"\n  !  AI reader: answer not checked "
                                                                     f"({type(exc).__name__}); the rules result is kept")
