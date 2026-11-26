@@ -1,12 +1,14 @@
-// Database access. Online (DATABASE_URL set): Neon Postgres. Laptop and tests: PGlite,
-// a Postgres that runs inside Node (no install), migrated on first use.
-// Azure later: Azure Database for PostgreSQL via DATABASE_URL (pg driver), same schema.
+// Database access. Online (DATABASE_URL set): Azure Database for PostgreSQL (standard pg with
+// strict verified TLS). Laptop and tests: PGlite, a Postgres that runs inside Node (no install),
+// migrated on first use.
 import "server-only";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
+import { pgPoolConfig } from "./pg-config.mjs";
 import * as schema from "./schema";
 
+export { pgPoolConfig };
 export type Db = PgDatabase<PgQueryResultHKT, typeof schema>;
 
 const MIGRATIONS = path.join(process.cwd(), "drizzle");
@@ -26,12 +28,11 @@ export function getDb(): Promise<Db> {
 async function connect(): Promise<Db> {
   const url = process.env.DATABASE_URL;
   if (url) {
-    const { Pool } = await import("@neondatabase/serverless");
-    const { drizzle } = await import("drizzle-orm/neon-serverless");
-    // Migrations run at build time (scripts/migrate.mjs), not per request.
-    return drizzle({ client: new Pool({ connectionString: url }), schema }) as unknown as Db;
+    const { Pool } = await import("pg");
+    const { drizzle } = await import("drizzle-orm/node-postgres");
+    return drizzle({ client: new Pool(pgPoolConfig(url)), schema }) as unknown as Db;
   }
-  if (process.env.NODE_ENV === "production" && process.env.VERCEL) {
+  if (process.env.NODE_ENV === "production" && process.env.ALLOW_LOCAL_DB !== "1") {
     throw new Error("DATABASE_URL is not set");
   }
   const dataDir = process.env.PGLITE_DIR ?? path.join(process.cwd(), ".data", "pglite");

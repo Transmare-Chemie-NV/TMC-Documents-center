@@ -7,7 +7,9 @@ import { getDb } from "@/lib/db";
 import { getAuditTrail, getDocument, getVersions } from "@/lib/documents/service";
 import { formatDate, formatDateTime } from "@/lib/format";
 import { canRerun } from "@/lib/jobs";
+import { getSharePoint, isSafeSharePointHost } from "@/lib/sharepoint";
 import { RerunButton } from "./rerun-button";
+import { SharePointPublishButton } from "./sharepoint-publish-button";
 import { dossierHref } from "@/lib/documents/dossier";
 
 export const metadata = { title: "Document · TMC Document Center" };
@@ -22,6 +24,9 @@ const ACTIONS: Record<string, string> = {
   "document.finalised": "Finalised",
   "document.rejected": "Rejected",
   "document.rerun": "Run again with the latest neutralizer",
+  "sharepoint.published": "Published to SharePoint",
+  "sharepoint.publish_failed": "SharePoint publish failed",
+  "sharepoint.imported": "Imported from SharePoint",
 };
 
 function Field({ label, value }: { label: string; value?: string | null }) {
@@ -58,6 +63,17 @@ export default async function DocumentPage({ params, searchParams }: PageProps<"
   const file = (kind: string, inline = false) => `/api/files/${doc.id}/${kind}${inline ? "?inline=1" : ""}`;
   const sourceIsPdf = doc.sourceFilename?.toLowerCase().endsWith(".pdf");
   const rerun = await canRerun(db, doc);
+  const spClient = (() => {
+    try {
+      return getSharePoint();
+    } catch {
+      return null;
+    }
+  })();
+  const spConfigured = !!spClient;
+  const safeSpUrl =
+    doc.sharepointWebUrl && isSafeSharePointHost(doc.sharepointWebUrl, spClient?.cfg.tenantHost) ? doc.sharepointWebUrl : null;
+  const showSharePoint = doc.status === "Final" && (spConfigured || !!doc.sharepointPublishedAt || !!doc.sharepointError);
 
   return (
     <PageShell user={user}>
@@ -94,6 +110,42 @@ export default async function DocumentPage({ params, searchParams }: PageProps<"
             ? "This is an old version. The current version is in the list below."
             : "This draft was replaced by a newer run of the neutralizer."}
         </p>
+      )}
+      {showSharePoint && (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md bg-white px-4 py-3 text-sm shadow-sm ring-1 ring-black/5">
+          {doc.sharepointPublishedAt && !doc.sharepointError ? (
+            <div>
+              <span className="font-medium text-green-700">In SharePoint</span> · {formatDateTime(doc.sharepointPublishedAt)}
+              {doc.sharepointFolderPath && <span className="text-gray-600"> · folder {doc.sharepointFolderPath}</span>}
+              {doc.sharepointPdfPath && (
+                <div className="mt-0.5 break-all text-xs text-gray-500">
+                  {doc.sharepointPdfPath}
+                  {doc.sharepointDocxPath ? ` · ${doc.sharepointDocxPath}` : ""}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div>
+              <span className="font-medium text-amber-800">Not published to SharePoint yet</span>
+              {doc.sharepointError && <div className="mt-0.5 text-xs text-red-700">{doc.sharepointError}</div>}
+            </div>
+          )}
+          <div className="flex flex-wrap gap-2">
+            {safeSpUrl && (
+              <a
+                href={safeSpUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="rounded-md border border-tmc px-3 py-1.5 text-sm font-medium text-tmc hover:bg-tmc-light"
+              >
+                Open in SharePoint
+              </a>
+            )}
+            {spConfigured && (!doc.sharepointPublishedAt || !!doc.sharepointError) && (
+              <SharePointPublishButton documentId={doc.id} label={doc.sharepointError ? "Retry SharePoint publish" : "Publish to SharePoint"} />
+            )}
+          </div>
+        </div>
       )}
 
       {/* Screen-by-screen: supplier original left, TMC document right (Willem 16/10). */}

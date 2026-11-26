@@ -131,13 +131,25 @@ const HIDE: [string, string][] = [
   [os.tmpdir(), "<tmp>"],
 ];
 
-/** Log for people: no server paths, never the AI reader's key, last 8 000 characters. */
+/** Log for people: no server paths, never secrets or connection strings, last 8 000 characters. */
 export function cleanLog(log: string, workDir: string) {
   let out = log.split(workDir).join("<job>");
   for (const [p, label] of HIDE) if (p.length > 1) out = out.split(p).join(label);
-  // the key as passed to the engine (trimmed), and as set, in case they differ (security review F7)
-  const raw = process.env.ANTHROPIC_API_KEY ?? "";
-  for (const key of new Set([raw.trim(), raw])) if (key.length >= 8) out = out.split(key).join("<key>");
+  // Secrets as passed (trimmed) and as set in env (security reviews F7, SEC-06)
+  const secrets: [string, string][] = [
+    ["ANTHROPIC_API_KEY", "<key>"],
+    ["SHAREPOINT_CLIENT_SECRET", "<secret>"],
+    ["WORKER_WAKE_SECRET", "<secret>"],
+    ["AUTH_SECRET", "<secret>"],
+    ["IDENTITY_HEADER", "<secret>"],
+  ];
+  for (const [envName, label] of secrets) {
+    const raw = process.env[envName] ?? "";
+    for (const secret of new Set([raw.trim(), raw])) if (secret.length >= 8) out = out.split(secret).join(label);
+  }
+  out = out
+    .replace(/postgres(?:ql)?:\/\/[^\s"'<>]+/gi, "<db-url>")
+    .replace(/\bBearer\s+[A-Za-z0-9\-._~+/]+=*/gi, "Bearer <token>");
   return out.length > LOG_MAX ? `…${out.slice(-LOG_MAX)}` : out;
 }
 

@@ -12,6 +12,7 @@ import type { Db } from "../db";
 import { apiJobs, type ApiJob, type ApiSupplierFile } from "../db/schema";
 import { cleanFilename, newUploadKey } from "../files";
 import { createJobs, JobError } from "../jobs";
+import { acquireTransferSlot } from "../sharepoint/guard";
 import type { Storage } from "../storage";
 import { ApiError } from "./errors";
 import { platformMaxBytes, readBytes } from "./http";
@@ -64,24 +65,46 @@ export async function handOverSupplierDocument(db: Db, storage: Storage, caller:
 
   // the same hand-off again: same bytes = the same answer, other bytes = conflict
   if (row.supplierFile && row.supplierFileKey === key.toLowerCase()) {
-    const bytes = await readBytes(req, platformMaxBytes());
+    const release = acquireTransferSlot();
+    if (!release) throw new ApiError("unavailable", [], 5);
+    let bytes: Uint8Array;
+    try {
+      bytes = await readBytes(req, platformMaxBytes());
+    } finally {
+      release();
+    }
     if (createHash("sha256").update(bytes).digest("hex") !== row.supplierFile.sha256) throw new ApiError("idempotency_conflict");
     return { body: view(await current(db, row), row.supplierFile), created: false };
   }
   const state = (await rollupMany(db, [row])).get(row.id)!.state;
   if (row.supplierFile || state !== "waiting-input") throw new ApiError("not_waiting_for_input");
 
-  // the header first, then the length (before a byte is read), then the real content
+  // the header first, then the length (before a byte is read), then early magic bytes + real content
   const contentType = (req.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
   if (contentType !== PDF && contentType !== DOCX) throw new ApiError("unsupported_type");
   const filename = fileNameHeader(req.headers.get("x-file-name"));
-  const bytes = await readBytes(req, platformMaxBytes());
-  const type = realType(bytes);
-  if (!type || type !== contentType || !ACCEPTED.includes(type)) throw new ApiError("unsupported_type");
 
-  const sha256 = createHash("sha256").update(bytes).digest("hex");
-  const file: ApiSupplierFile = { key: newUploadKey("input"), filename, sha256, size: bytes.length, contentType: type };
-  await storage.put(file.key, bytes, type);
+  const release = acquireTransferSlot();
+  if (!release) throw new ApiError("unavailable", [], 5);
+  let sha256: string;
+  let type: string;
+  let file: ApiSupplierFile;
+  try {
+    const bytes = await readBytes(req, platformMaxBytes(), {
+      validateHead: (head) => {
+        const detected = realType(head);
+        return !!detected && detected === contentType && ACCEPTED.includes(detected);
+      },
+    });
+    const detected = realType(bytes);
+    if (!detected || detected !== contentType || !ACCEPTED.includes(detected)) throw new ApiError("unsupported_type");
+    type = detected;
+    sha256 = createHash("sha256").update(bytes).digest("hex");
+    file = { key: newUploadKey("input"), filename, sha256, size: bytes.length, contentType: type };
+    await storage.put(file.key, bytes, type);
+  } finally {
+    release();
+  }
   const stored = await db.transaction(async (tx) => {
     const [locked] = await tx.select().from(apiJobs).where(eq(apiJobs.id, row.id)).for("update");
     if (locked.cancelledAt || locked.supplierFile) return null; // a cancel or another hand-off came first
@@ -94,7 +117,7 @@ export async function handOverSupplierDocument(db: Db, storage: Storage, caller:
       apiJob: row.id,
       client: caller.client,
       sha256,
-      size: bytes.length,
+      size: file.size,
       contentType: type,
     });
     return updated;

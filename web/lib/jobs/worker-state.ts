@@ -124,6 +124,7 @@ export async function saveDrafts(db: Db, job: Job, drafts: Draft[], exitCode: nu
           yellowParts: d.yellowParts,
           previewKey: notNeeded ? null : d.previewKey,
           viewKey: notNeeded ? null : (d.viewKey ?? null),
+          sharepointFolderPath: job.sharepointFolderPath ?? null,
           createdBy: job.createdBy,
           jobId: job.id,
         })

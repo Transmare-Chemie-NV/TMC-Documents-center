@@ -1,18 +1,33 @@
 import type { NextConfig } from "next";
 
-// The browser may only talk to this app and the file store (review F4, editor 20/10): the
-// document editor runs in the page and must never send a document anywhere else (own editor:
-// no blob: or data: needed, review L2). Production only; the development server needs its own
-// live-reload connection.
-const CONNECT = "connect-src 'self' https://vercel.com https://*.vercel-storage.com";
-const CSP = process.env.NODE_ENV === "production" ? `frame-ancestors 'self'; ${CONNECT}` : "frame-ancestors 'self'";
+// Production CSP (review F4, L2, SEC-07): restricts script, object, form, frame, base and network
+// destinations so browser-side pages (including the document editor) cannot exfiltrate documents.
+// On Azure (Azure Blob Storage or SharePoint), all uploads go to /api/upload-file ('self').
+const CSP =
+  process.env.NODE_ENV === "production"
+    ? [
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data:",
+        "font-src 'self'",
+        "frame-src 'self'",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+        "frame-ancestors 'self'",
+        "connect-src 'self'",
+      ].join("; ")
+    : "frame-ancestors 'self'";
 
 // Cache Components is off on purpose: every page here is per-user (login cookie),
 // so there is nothing to prerender.
 const nextConfig: NextConfig = {
+  // Enabled when building web/Dockerfile for Azure Container Apps.
+  ...(process.env.NEXT_STANDALONE === "1" ? { output: "standalone" as const } : {}),
   poweredByHeader: false,
-  // PGlite (laptop database) ships WebAssembly; load it from node_modules, do not bundle it.
-  serverExternalPackages: ["@electric-sql/pglite"],
+  // PGlite (laptop database) ships WebAssembly; pg uses optional native bindings.
+  serverExternalPackages: ["@electric-sql/pglite", "pg"],
   async headers() {
     return [
       {

@@ -253,9 +253,10 @@ describe("PUT /jobs/{id}/supplier-document (15.1)", () => {
 
   it("the declared length is refused before a byte is read (413), and a body shorter than it too", async () => {
     const { job } = await create();
-    expect((await put(job.jobId, PDF, { "content-length": String(5 * 1024 * 1024) })).status).toBe(413); // Vercel default 4 MB
-    process.env.DC_API_MAX_BODY_MB = "100";
-    expect((await put(job.jobId, PDF, { "content-length": String(100 * 1024 * 1024 + 1) })).status).toBe(413);
+    expect((await put(job.jobId, PDF, { "content-length": String(100 * 1024 * 1024 + 1) })).status).toBe(413); // Azure default 100 MB
+    process.env.DC_API_MAX_BODY_MB = "4";
+    expect((await put(job.jobId, PDF, { "content-length": String(5 * 1024 * 1024) })).status).toBe(413);
+    delete process.env.DC_API_MAX_BODY_MB;
     // a body shorter than its own length is refused
     expect(await code(await put(job.jobId, PDF, { "content-length": String(PDF.length + 10) }))).toBe("invalid_payload");
     const [row] = await db.select().from(schema.apiJobs).where(eq(schema.apiJobs.id, job.jobId));
@@ -275,6 +276,47 @@ describe("PUT /jobs/{id}/supplier-document (15.1)", () => {
       ctx({ id: job.jobId }),
     );
     expect(await code(await put(job.jobId, PDF))).toBe("not_waiting_for_input");
+  });
+
+  it("enforces transfer concurrency cap (503) and rejects non-PDF magic bytes early before buffering (H1)", async () => {
+    const { acquireTransferSlot } = await import("@/lib/sharepoint/guard");
+    const { job } = await create();
+
+    // Concurrency semaphore full -> 503 unavailable with Retry-After
+    const s1 = acquireTransferSlot()!;
+    const s2 = acquireTransferSlot()!;
+    const s3 = acquireTransferSlot()!;
+    const busy = await put(job.jobId, PDF);
+    expect(busy.status).toBe(503);
+    expect(busy.headers.get("retry-after")).toBeTruthy();
+    s1();
+    s2();
+    s3();
+
+    // Early magic-byte check stops reading after the first chunk instead of buffering 10 MB
+    let chunksPulled = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(c) {
+        chunksPulled++;
+        if (chunksPulled === 1) c.enqueue(new TextEncoder().encode("NOT-A-PDF-HEADER"));
+        else c.enqueue(new Uint8Array(64 * 1024));
+      },
+    });
+    const req = new Request(`${BASE}/jobs/${job.jobId}/supplier-document`, {
+      method: "PUT",
+      headers: {
+        ...auth(),
+        "content-type": "application/pdf",
+        "content-length": String(10 * 1024 * 1024),
+        "idempotency-key": randomUUID(),
+        "x-file-name": encodeURIComponent("fake.pdf"),
+      },
+      body: stream,
+      duplex: "half",
+    } as RequestInit);
+    const res = await handoffRoute.PUT(req, ctx({ id: job.jobId }));
+    expect(res.status).toBe(415);
+    expect(chunksPulled).toBeLessThanOrEqual(2);
   });
 });
 
@@ -308,8 +350,10 @@ describe("GET /jobs/{id}/results/{documentId}/file (15.3)", () => {
     const other = await create();
     expect((await get(other.job.jobId, doc.id)).status).toBe(404);
     expect((await get(job.jobId, randomUUID())).status).toBe(404);
+    process.env.DC_API_MAX_BODY_MB = "4";
     files.set(doc.pdfKey, new Uint8Array(5 * 1024 * 1024).fill(0x25));
-    expect(await code(await get(job.jobId, doc.id))).toBe("too_large_for_link"); // over the 4 MB platform limit (413)
+    expect(await code(await get(job.jobId, doc.id))).toBe("too_large_for_link"); // over the configured platform limit (413)
+    delete process.env.DC_API_MAX_BODY_MB;
     for (const status of ["To check", "Superseded"] as const) {
       await db.update(schema.documents).set({ status, ...(status === "To check" ? { version: null } : {}) }).where(eq(schema.documents.id, doc.id));
       expect(await code(await get(job.jobId, doc.id))).toBe("not_final");

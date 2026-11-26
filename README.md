@@ -20,12 +20,10 @@ Starter pack for building the TMC Document Center with Claude Code (16/10/2026).
 4. Open a terminal in the folder and start Claude Code (`claude`).
 5. Paste the text from `KICKOFF_PROMPT.md`. Claude Code answers with a plan and questions; it builds nothing until you say ok.
 
-## Before phase 0 can go live on Vercel
+## Hosting on Azure
 
-- Your Vercel Hobby account is fine for the prototype with test documents; Pro before colleagues use it
-- GitHub account (code storage); Claude Code puts the code there, Vercel deploys it from there
-- No Entra needed for the pilot: simple password login first, Microsoft login in the Azure phase
-- Decision from Jeroen whether real supplier documents may be stored on Vercel; until then, test documents only
+- The app runs strictly on **Azure** (Azure Container Apps `tmc-doccenter-web` + `tmc-doccenter-worker`, Azure Database for PostgreSQL `tmc-doccenter-db`, Azure Blob Storage `tmcdoccenterstorage` with passwordless Entra Managed Identity, and SharePoint via `Sites.Selected`).
+- See `docs/AZURE.md` for environment variables, ACR build and Container Apps deploy commands, and switching between Azure Blob Storage and SharePoint.
 
 ## Engine check (16/10/2026, run in the cloud)
 

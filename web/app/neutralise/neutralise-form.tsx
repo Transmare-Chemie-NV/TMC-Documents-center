@@ -3,7 +3,8 @@
 import { useRouter } from "next/navigation";
 import { useState, useSyncExternalStore } from "react";
 import { DropZone } from "@/components/drop-zone";
-import { sendFile } from "@/lib/client-upload";
+import { SharePointPicker, type PickedSharePointFile } from "@/components/sharepoint-picker";
+import { sendFile, type UploadMode } from "@/lib/client-upload";
 import { ENTITIES, type Entity, type Route } from "@/lib/constants";
 import { MAX_FILE_MB, maxFileBytes } from "@/lib/files";
 import { submitJobs } from "./actions";
@@ -15,7 +16,15 @@ const ROUTE_LABEL: Record<Route, string> = {
   tds: "TDS or specification sheet",
 };
 
-type Row = { file: File; productName: string; fileNr: string; batch: string; lineNo?: number };
+type RowSource =
+  | { kind: "local"; file: File; filename: string }
+  | { kind: "imported"; key: string; filename: string; sharepointFolderPath: string | null };
+
+type Row = { source: RowSource; productName: string; fileNr: string; batch: string; lineNo?: number };
+
+type CommercialSource =
+  | { kind: "local"; file: File; filename: string }
+  | { kind: "imported"; key: string; filename: string };
 
 /** A request from TMC Logistics this form answers (API v1): route, entity and dossier come with it. */
 export type FormRequest = {
@@ -42,17 +51,19 @@ export function NeutraliseForm({
   uploadMode,
   entitiesWithDetails,
   request,
+  sharePointEnabled = false,
 }: {
-  uploadMode: "blob" | "local";
+  uploadMode: UploadMode;
   entitiesWithDetails: string[];
   request?: FormRequest;
+  sharePointEnabled?: boolean;
 }) {
   const router = useRouter();
   const ready = useSyncExternalStore(noSubscribe, () => true, () => false);
   const [route, setRoute] = useState<Route>(request?.route ?? "auto");
   const [entity, setEntity] = useState<Entity>(request?.entity ?? "TMC");
   const [rows, setRows] = useState<Row[]>([]);
-  const [commercial, setCommercial] = useState<File[]>([]);
+  const [commercial, setCommercial] = useState<CommercialSource[]>([]);
   const [supplierName, setSupplierName] = useState(request?.supplierName ?? "");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -66,7 +77,31 @@ export function NeutraliseForm({
     // a request's dossier and, with one line, its description: proposed values the person may change
     const only = request?.lines.length === 1 ? request.lines[0] : undefined;
     const prefill = { productName: only?.description ?? "", fileNr: request?.orderNo ?? "", lineNo: only?.lineNo };
-    setRows((r) => [...r, ...ok.map((file) => ({ file, batch: "", ...prefill }))].slice(0, 20));
+    setRows((r) =>
+      [...r, ...ok.map((file) => ({ source: { kind: "local" as const, file, filename: file.name }, batch: "", ...prefill }))].slice(0, 20),
+    );
+  }
+
+  function addSharePointSupplier(picked: PickedSharePointFile) {
+    setError(null);
+    const only = request?.lines.length === 1 ? request.lines[0] : undefined;
+    setRows((r) =>
+      [
+        ...r,
+        {
+          source: { kind: "imported" as const, key: picked.key, filename: picked.filename, sharepointFolderPath: picked.folderPath },
+          productName: only?.description ?? "",
+          fileNr: request?.orderNo ?? picked.suggestedFileNr ?? "",
+          batch: "",
+          lineNo: only?.lineNo,
+        },
+      ].slice(0, 20),
+    );
+  }
+
+  function addSharePointCommercial(picked: PickedSharePointFile) {
+    setError(null);
+    setCommercial((c) => [...c, { kind: "imported" as const, key: picked.key, filename: picked.filename }].slice(0, 5));
   }
 
   function update(i: number, patch: Partial<Row>) {
@@ -87,13 +122,25 @@ export function NeutraliseForm({
       const commercialRefs = [];
       if (withCommercial) {
         for (const f of commercial) {
-          setBusy(`Uploading ${f.name}…`);
-          commercialRefs.push({ key: await sendFile(uploadMode, "input", f), filename: f.name });
+          if (f.kind === "imported") {
+            commercialRefs.push({ key: f.key, filename: f.filename });
+          } else {
+            setBusy(`Uploading ${f.filename}…`);
+            commercialRefs.push({ key: await sendFile(uploadMode, "input", f.file), filename: f.filename });
+          }
         }
       }
       const jobs = [];
       for (const row of rows) {
-        setBusy(`Uploading ${row.file.name}…`);
+        let supplierFile: { key: string; filename: string };
+        let sharepointFolderPath: string | undefined;
+        if (row.source.kind === "imported") {
+          supplierFile = { key: row.source.key, filename: row.source.filename };
+          sharepointFolderPath = row.source.sharepointFolderPath ?? undefined;
+        } else {
+          setBusy(`Uploading ${row.source.filename}…`);
+          supplierFile = { key: await sendFile(uploadMode, "input", row.source.file), filename: row.source.filename };
+        }
         jobs.push({
           route,
           entity,
@@ -101,8 +148,9 @@ export function NeutraliseForm({
           fileNr: row.fileNr,
           batch: showBatch ? row.batch : "",
           supplierName,
-          supplierFile: { key: await sendFile(uploadMode, "input", row.file), filename: row.file.name },
+          supplierFile,
           commercialFiles: commercialRefs,
+          ...(sharepointFolderPath ? { sharepointFolderPath } : {}),
           ...(request ? { apiJobId: request.id } : {}),
         });
       }
@@ -160,6 +208,14 @@ export function NeutraliseForm({
         </label>
       </section>
 
+      {sharePointEnabled && (
+        <SharePointPicker
+          allowCommercial={withCommercial}
+          onAddSupplier={addSharePointSupplier}
+          onAddCommercial={addSharePointCommercial}
+        />
+      )}
+
       <section className="rounded-lg bg-white p-5 shadow-sm ring-1 ring-black/5">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="font-semibold">Supplier documents (PDF)</h2>
@@ -191,8 +247,11 @@ export function NeutraliseForm({
               <tbody>
                 {rows.map((row, i) => (
                   <tr key={i} className="border-t border-gray-100">
-                    <td className="max-w-[14rem] truncate py-1.5 pr-2" title={row.file.name}>
-                      {row.file.name}
+                    <td className="max-w-[14rem] truncate py-1.5 pr-2" title={row.source.filename}>
+                      {row.source.filename}
+                      {row.source.kind === "imported" && (
+                        <span className="ml-1 rounded bg-tmc-light px-1 text-[11px] text-tmc">SharePoint</span>
+                      )}
                     </td>
                     {request && (
                       <td className="py-1.5 pr-2">
@@ -203,7 +262,7 @@ export function NeutraliseForm({
                             update(i, { lineNo: l?.lineNo, productName: l?.description ?? row.productName });
                           }}
                           className={input}
-                          aria-label={`BC line for ${row.file.name}`}
+                          aria-label={`BC line for ${row.source.filename}`}
                         >
                           <option value="">Choose a line</option>
                           {request.lines.map((l) => (
@@ -215,14 +274,14 @@ export function NeutraliseForm({
                       </td>
                     )}
                     <td className="py-1.5 pr-2">
-                      <input value={row.productName} onChange={(e) => update(i, { productName: e.target.value })} maxLength={200} className={input} aria-label={`Product for ${row.file.name}`} />
+                      <input value={row.productName} onChange={(e) => update(i, { productName: e.target.value })} maxLength={200} className={input} aria-label={`Product for ${row.source.filename}`} />
                     </td>
                     <td className="py-1.5 pr-2">
-                      <input value={row.fileNr} onChange={(e) => update(i, { fileNr: e.target.value })} maxLength={50} placeholder="840.S0850" className={input} aria-label={`Dossier for ${row.file.name}`} />
+                      <input value={row.fileNr} onChange={(e) => update(i, { fileNr: e.target.value })} maxLength={50} placeholder="840.S0850" className={input} aria-label={`Dossier for ${row.source.filename}`} />
                     </td>
                     {showBatch && (
                       <td className="py-1.5 pr-2">
-                        <input value={row.batch} onChange={(e) => update(i, { batch: e.target.value })} maxLength={100} className={input} aria-label={`Batch for ${row.file.name}`} />
+                        <input value={row.batch} onChange={(e) => update(i, { batch: e.target.value })} maxLength={100} className={input} aria-label={`Batch for ${row.source.filename}`} />
                       </td>
                     )}
                     <td>
@@ -253,11 +312,29 @@ export function NeutraliseForm({
               onFiles={(files) => {
                 const { ok, error } = pdfsOnly(files);
                 if (error) setError(error);
-                else setCommercial(ok.slice(0, 5));
+                else setCommercial((prev) => [...prev, ...ok.map((file) => ({ kind: "local" as const, file, filename: file.name }))].slice(0, 5));
               }}
             />
           </div>
-          {commercial.length > 0 && <p className="mt-1 text-xs text-gray-600">{commercial.map((f) => f.name).join(", ")}</p>}
+          {commercial.length > 0 && (
+            <ul className="mt-2 space-y-1 text-xs text-gray-700">
+              {commercial.map((f, i) => (
+                <li key={i} className="flex items-center justify-between gap-2">
+                  <span>
+                    {f.filename}
+                    {f.kind === "imported" && <span className="ml-1 rounded bg-tmc-light px-1 text-[11px] text-tmc">SharePoint</span>}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setCommercial((c) => c.filter((_, j) => j !== i))}
+                    className="text-red-700 underline"
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
       )}
 

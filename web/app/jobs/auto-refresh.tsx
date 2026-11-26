@@ -6,8 +6,8 @@ import { refreshStep } from "@/lib/refresh";
 
 /** Reloads the page data while jobs are still waiting or running: every few seconds at first,
  * every 30 seconds after two minutes, never while the tab is in the background, and not at all
- * after half an hour (a job waiting that long needs a person, and it saves the free Vercel
- * allowance; 26/10/2026, first live run). */
+ * after half an hour (a job waiting that long needs a person, and stopping lets Azure Container
+ * Apps scale back to zero when idle). */
 export function AutoRefresh({ seconds }: { seconds: number }) {
   const router = useRouter();
   const [stopped, setStopped] = useState(false);

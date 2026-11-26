@@ -5,11 +5,11 @@ how the Document Center implements it. Nothing here changes a hard rule of BRIEF
 
 ## Switch and settings
 
-| Env (Vercel) | Meaning |
+| Env (Azure Container App) | Meaning |
 |---|---|
 | `API_CLIENTS_ENABLED` | `on` = API answers. Anything else (default) = every call `503 unavailable`. |
 | `APP_URL` | This app's own address (https; `http://localhost:3002` on a laptop). Used for every `link`. Missing or not https = `503`. |
-| `DC_API_MAX_BODY_MB` | v1.1: the largest file a function takes or sends. Default 4 (Vercel stops near 4.5 MB); on Azure 100 (the Final file stays at most 25). |
+| `DC_API_MAX_BODY_MB` | v1.1: the largest file a route takes or sends. Default 100 on Azure (clamped 1 to 100; the Final file stays at most 25). |
 
 Keys: Settings > API keys (admins). A key is `tdc_<client>_<43 chars>`, shown once, stored as SHA-256 only. At most two
 active keys per client (current + next). Rotation: make the next key, put it in TMC Logistics, deactivate the old one.
@@ -98,5 +98,5 @@ v1.1: `api.job.input` (client, job, SHA-256, size, content type; never the file 
   order no and product name = line description as proposals, supplier name mandatory). Label: "Make label" per line opens
   the label form prefilled. v1.1: a document TMC Logistics handed over without a supplier name shows "Supplier document
   from TMC Logistics" with the supplier name to type (prefilled when it came with the job) and "Send to the neutralizer".
-- Deploy order: the worker (Railway) before the web app (Vercel), because the worker saves drafts of a cancelled request
+- Deploy order: the worker (`tmc-doccenter-worker`) before the web app (`tmc-doccenter-web`), because the worker saves drafts of a cancelled request
   as Rejected.

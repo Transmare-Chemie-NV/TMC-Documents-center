@@ -102,6 +102,8 @@ export const jobs = pgTable(
     log: text("log"),
     // The request from a calling app (API v1) this run belongs to; null for the app's own jobs.
     apiJobId: uuid("api_job_id").references((): AnyPgColumn => apiJobs.id),
+    // Phase 4a: optional SharePoint order folder path when files were picked from SharePoint.
+    sharepointFolderPath: text("sharepoint_folder_path"),
     attempts: integer("attempts").notNull().default(0),
     createdBy: text("created_by").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -251,6 +253,14 @@ export const documents = pgTable(
     previewKey: text("preview_key"),
     // The on-screen editor's view of the draft (web/worker/yellow.py view), made with the draft.
     viewKey: text("view_key"),
+    // Phase 4a: SharePoint order/General publishing state for Final documents (PDF + Word, _v1/_v2).
+    sharepointFolderPath: text("sharepoint_folder_path"),
+    sharepointPdfPath: text("sharepoint_pdf_path"),
+    sharepointDocxPath: text("sharepoint_docx_path"),
+    sharepointWebUrl: text("sharepoint_web_url"),
+    sharepointPublishedAt: timestamp("sharepoint_published_at", { withTimezone: true }),
+    sharepointPublishingAt: timestamp("sharepoint_publishing_at", { withTimezone: true }),
+    sharepointError: text("sharepoint_error"),
   },
   (t) => [
     // Never two Final versions of the same document. Drafts may sit next to the Final one.

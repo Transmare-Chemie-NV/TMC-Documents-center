@@ -28,7 +28,7 @@ export default async function ApiKeysPage({ searchParams }: PageProps<"/settings
       <p className={`mt-2 text-sm font-medium ${apiEnabled() ? "text-green-700" : "text-amber-800"}`}>
         {apiEnabled()
           ? "The API is on (API_CLIENTS_ENABLED=on)."
-          : "The API is off: every call is refused until API_CLIENTS_ENABLED=on is set on Vercel."}
+          : "The API is off: every call is refused until API_CLIENTS_ENABLED=on is set in the Azure Container App settings."}
       </p>
       <Notice ok={sp.ok} error={sp.error} />
 

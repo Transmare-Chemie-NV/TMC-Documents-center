@@ -9,6 +9,7 @@ import type { Db } from "../db";
 import { auditLog, documents, type DocStatus, type DocType, type Entity } from "../db/schema";
 import { detectType, MAX_FILE_MB, maxFileBytes, parseUploadKey, cleanFilename, type FileKind } from "../files";
 import { fileStem } from "../naming";
+import { tryPublishFinal } from "../sharepoint";
 import type { Storage } from "../storage";
 import { documentInput, type DocumentInput } from "./input";
 
@@ -40,9 +41,10 @@ export async function createDocument(db: Db, storage: Storage, actor: Actor, raw
   });
 
   // Two people saving the same name at once: the unique index stops the second one; retry once.
+  let created: CreateResult;
   for (let attempt = 0; ; attempt++) {
     try {
-      return await db.transaction(async (tx) => {
+      created = await db.transaction(async (tx) => {
         const [current] = await tx
           .select({ id: documents.id, version: documents.version })
           .from(documents)
@@ -95,11 +97,15 @@ export async function createDocument(db: Db, storage: Storage, actor: Actor, raw
         await logAudit(tx, actor, "document.created", row.id, { name, version, files: Object.keys(files) });
         return { id: row.id, name, version, supersededVersion: current?.version ?? null };
       });
+      break;
     } catch (err) {
       if (attempt === 0 && isUniqueViolation(err)) continue;
       throw err;
     }
   }
+  // Best-effort publish to SharePoint order folder (or General/) once the DB transaction commits.
+  await tryPublishFinal(db, storage, created.id, actor);
+  return created;
 }
 
 async function checkUploadedFile(db: Db, storage: Storage, kind: FileKind, key: string) {

@@ -1,5 +1,5 @@
-// Login brake inside the app, per server instance. The real rate limit is a Vercel Firewall
-// rule on POST /login; this is the fallback so guessing stays slow and cheap without it.
+// Login brake inside the app, per server instance. For public production add an Azure WAF /
+// Front Door rate-limit rule on POST /login; this is the in-app fallback so guessing stays slow.
 import "server-only";
 
 const WINDOW_MS = 15 * 60 * 1000;

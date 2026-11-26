@@ -9,6 +9,7 @@ import type { Db } from "../db";
 import { documents, ENTITIES, jobs, ROUTES, type Job } from "../db/schema";
 import { getEntity } from "../entities";
 import { cleanFilename, detectType, MAX_FILE_MB, maxFileBytes, parseUploadKey } from "../files";
+import { isInsideInternalStorage, isWithinFolder, readSharePointConfig, sanitizeRelativePath } from "../sharepoint/config";
 import type { Storage } from "../storage";
 
 export class JobError extends Error {}
@@ -42,9 +43,32 @@ export const jobInput = z.object({
   commercialFiles: z.array(fileRef).max(5).default([]),
   // A request from TMC Logistics this supplier document answers (API v1); its kind fixes the route.
   apiJobId: z.uuid().optional(),
+  // Optional SharePoint order folder path when files were picked from SharePoint (Phase 4a).
+  sharepointFolderPath: text(300),
 });
 
 export type JobInput = z.input<typeof jobInput>;
+
+function validateSharePointFolder(raw: string | null): string | null {
+  if (!raw) return null;
+  let cleaned: string;
+  try {
+    cleaned = sanitizeRelativePath(raw, { allowEmpty: true, label: "SharePoint folder" });
+  } catch {
+    throw new JobError("invalid SharePoint folder path");
+  }
+  if (!cleaned) return null;
+  const cfg = readSharePointConfig();
+  const internal = cfg?.storageFolder ?? "_app-storage";
+  const general = cfg?.generalFolder ?? "General";
+  if (isInsideInternalStorage(cleaned, undefined, internal) || isWithinFolder(cleaned, general)) {
+    throw new JobError("invalid SharePoint folder path");
+  }
+  if (cfg?.ordersRoot && !isWithinFolder(cleaned, cfg.ordersRoot)) {
+    throw new JobError("invalid SharePoint folder path");
+  }
+  return cleaned;
+}
 
 async function checkInput(storage: Storage, ref: { key: string; filename: string }) {
   const parsed = parseUploadKey(ref.key);
@@ -72,6 +96,7 @@ async function prepareJob(db: Db, storage: Storage, raw: JobInput): Promise<Prep
   }
   return {
     ...input,
+    sharepointFolderPath: validateSharePointFolder(input.sharepointFolderPath),
     supplierFile: await checkInput(storage, input.supplierFile),
     commercialFiles: await Promise.all(input.commercialFiles.map((f) => checkInput(storage, f))),
   };
@@ -209,6 +234,7 @@ export async function rerunJob(db: Db, storage: Storage, actor: Actor, documentI
     supplierName: source.supplierName,
     supplierFile: source.supplierFile,
     commercialFiles: source.commercialFiles,
+    sharepointFolderPath: source.sharepointFolderPath ?? undefined,
   });
   let id: string;
   try {
@@ -244,12 +270,13 @@ export async function wakeWorker() {
   // The secret only travels over https (plain http allowed on a laptop), and never follows a redirect.
   if (!url.startsWith("https://") && process.env.NODE_ENV === "production") return;
   try {
-    await fetch(url, {
+    const res = await fetch(url, {
       method: "POST",
       headers: { authorization: `Bearer ${secret}` },
       redirect: "manual",
-      signal: AbortSignal.timeout(2000),
+      signal: AbortSignal.timeout(5000),
     });
+    await res.body?.cancel().catch(() => {});
   } catch {
     // ignored on purpose
   }

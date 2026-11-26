@@ -15,7 +15,7 @@ export async function submitJobs(inputs: JobInput[]): Promise<CreateJobsResult> 
     return { ok: true, count: ids.length };
   } catch (err) {
     if (err instanceof JobError || err instanceof RequestError) return { ok: false, error: err.message };
-    console.error("submitJobs failed", err instanceof Error ? err.message : err);
+    console.error("submitJobs failed:", err instanceof Error ? err.name : typeof err);
     return { ok: false, error: "Sending the documents failed. Try again or tell the administrator." };
   }
 }

@@ -18,6 +18,7 @@ import { MAX_FILE_MB, maxFileBytes, newUploadKey } from "../lib/files";
 import { failJob, saveDrafts, saveFinal, type Draft } from "../lib/jobs/worker-state";
 import { labelTemplate } from "../lib/labels/templates";
 import { fileStem, nameParts, plainName } from "../lib/naming";
+import { tryPublishFinal } from "../lib/sharepoint";
 import type { Storage } from "../lib/storage";
 import { aiEngineEnv, engineAi, logAiUsage, readAiUsage } from "./ai";
 import { cleanLog, engineArgv, finaliseArgv, labelArgv, runPython, yellowArgv } from "./engine";
@@ -374,6 +375,7 @@ ${stays}`);
       const bad = await layoutOk(enginePdf);
       if (bad) return failJob(db, job, null, bad);
       await saveFinal(db, job, { ...files, ...approved }, safe.log);
+      await tryPublishFinal(db, storage, job.documentId, { email: job.createdBy });
       return;
     }
     const run = await runPython(finaliseArgv(finalDocx), dir);
@@ -398,6 +400,7 @@ ${stays}`);
       context: c.unknown.length ? `not in the original, accepted after the warning: ${c.unknown.join(" ")}`.slice(0, 300) : null,
     }));
     await saveFinal(db, job, { ...files, pdfKey, docxKey }, run.log, feedbackRows);
+    await tryPublishFinal(db, storage, job.documentId, { email: job.createdBy });
   } catch (err) {
     await failJob(db, job, null, cleanLog(`[worker] ${err instanceof Error ? err.message : "unexpected error"}`, dir));
   } finally {

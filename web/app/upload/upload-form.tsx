@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState, useSyncExternalStore } from "react";
 import { ENTITIES } from "@/lib/constants";
 import { DropZone } from "@/components/drop-zone";
-import { sendFile } from "@/lib/client-upload";
+import { sendFile, type UploadMode } from "@/lib/client-upload";
 import { MAX_FILE_MB, maxFileBytes, type FileKind } from "@/lib/files";
 import { fileStem, NAMED_TYPES } from "@/lib/naming";
 import { saveDocument } from "./actions";
@@ -40,7 +40,7 @@ const input =
 
 const noSubscribe = () => () => {};
 
-export function UploadForm({ uploadMode }: { uploadMode: "blob" | "local" }) {
+export function UploadForm({ uploadMode }: { uploadMode: UploadMode }) {
   const router = useRouter();
   const [type, setType] = useState<NamedType>("COA");
   const [entity, setEntity] = useState<(typeof ENTITIES)[number]>("TMC");

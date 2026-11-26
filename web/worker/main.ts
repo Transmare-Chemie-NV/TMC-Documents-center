@@ -1,6 +1,6 @@
-// TMC Document Center worker. Runs on Railway (later Azure Container Apps) as a Docker image
-// with Node, Python, LibreOffice and Tesseract. It sleeps until the app sends a wake-up call
-// (POST /wake) and also checks for work every 30 minutes, so the free database can sleep.
+// TMC Document Center worker. Runs on Azure Container Apps (tmc-doccenter-worker) as a Docker image
+// with Node, Python, LibreOffice and Tesseract. It sleeps until the web app sends a wake-up call
+// (POST /wake) and also checks for work every 30 minutes.
 import { timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { getDb } from "../lib/db";
