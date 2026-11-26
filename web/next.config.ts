@@ -2,8 +2,7 @@ import type { NextConfig } from "next";
 
 // Production CSP (review F4, L2, SEC-07): restricts script, object, form, frame, base and network
 // destinations so browser-side pages (including the document editor) cannot exfiltrate documents.
-// On Azure/SharePoint, uploads go to /api/upload-file ('self'); Vercel Blob adds only its own hosts.
-const BLOB_CONNECT = process.env.BLOB_READ_WRITE_TOKEN ? " https://vercel.com https://*.vercel-storage.com" : "";
+// On Azure (Azure Blob Storage or SharePoint), all uploads go to /api/upload-file ('self').
 const CSP =
   process.env.NODE_ENV === "production"
     ? [
@@ -17,14 +16,14 @@ const CSP =
         "base-uri 'self'",
         "form-action 'self'",
         "frame-ancestors 'self'",
-        `connect-src 'self'${BLOB_CONNECT}`,
+        "connect-src 'self'",
       ].join("; ")
     : "frame-ancestors 'self'";
 
 // Cache Components is off on purpose: every page here is per-user (login cookie),
 // so there is nothing to prerender.
 const nextConfig: NextConfig = {
-  // Enabled when building web/Dockerfile for Azure Container Apps; unset on Vercel.
+  // Enabled when building web/Dockerfile for Azure Container Apps.
   ...(process.env.NEXT_STANDALONE === "1" ? { output: "standalone" as const } : {}),
   poweredByHeader: false,
   // PGlite (laptop database) ships WebAssembly; pg uses optional native bindings.

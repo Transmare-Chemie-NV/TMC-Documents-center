@@ -288,5 +288,26 @@ describe("SharePoint & server-upload API routes (auth, CSRF, rate/concurrency li
 
     const audits = await db.select().from(auditLog).where(eq(auditLog.action, "upload.created"));
     expect(audits).toHaveLength(1);
+    expect(audits[0].details?.backend).toBe("sharepoint");
+  });
+
+  it("accepts uploads on /api/upload-file when storage backend is azure-blob", async () => {
+    spState = null;
+    storageMock = { ...storageMock, mode: "azure-blob" };
+
+    const res = await uploadFilePost(
+      new Request("http://localhost/api/upload-file", {
+        method: "POST",
+        headers: { "x-upload-kind": "input", "content-length": String(PDF.length) },
+        body: PDF,
+      }),
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { key: string };
+    expect(json.key).toMatch(/^uploads\/.+\/input$/);
+
+    const audits = await db.select().from(auditLog).where(eq(auditLog.action, "upload.created"));
+    expect(audits).toHaveLength(1);
+    expect(audits[0].details?.backend).toBe("azure-blob");
   });
 });

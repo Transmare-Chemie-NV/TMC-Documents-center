@@ -1,20 +1,29 @@
-// File storage behind one small interface.
-// Azure: SharePoint document library via Microsoft Graph (mode: "sharepoint").
-// Vercel: Vercel Blob private files (mode: "blob").
-// Laptop and tests: a local folder .data/files (mode: "local").
+// File storage behind one small interface (Azure + laptop local dev).
+//   - "azure-blob": Azure Blob Storage via passwordless Entra Managed Identity (AZURE_CLIENT_ID)
+//   - "sharepoint": SharePoint document library via Microsoft Graph (Sites.Selected)
+//   - "local": local folder .data/files (laptop and unit tests only)
+// Controlled explicitly by STORAGE_BACKEND ("azure-blob" | "sharepoint" | "local"), or auto-selected
+// from configured env vars (SharePoint -> Azure Blob -> local dev). Fails closed in production.
 import "server-only";
 import { createReadStream } from "node:fs";
 import { mkdir, open, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { parseUploadKey } from "../files";
-import { createSharePointStorage, getSharePoint, resetSharePointCache } from "../sharepoint";
+import {
+  createGraphClient,
+  createSharePointStorage,
+  getSharePoint,
+  readSharePointConfig,
+  resetSharePointCache,
+} from "../sharepoint";
+import { createAzureBlobStorage, readAzureBlobConfig } from "./azure-blob";
 
-export type StorageMode = "blob" | "local" | "sharepoint";
+export type StorageMode = "azure-blob" | "sharepoint" | "local";
 export type StoredFile = { stream: ReadableStream<Uint8Array>; size: number | null; contentType: string | null };
 
 export interface Storage {
-  /** "blob": browser uploads straight to Vercel Blob. "sharepoint": browser posts to /api/upload-file. "local": /api/upload-local. */
+  /** "azure-blob" / "sharepoint": browser posts to /api/upload-file. "local": /api/upload-local. */
   readonly mode: StorageMode;
   get(key: string): Promise<StoredFile | null>;
   /** First `n` bytes and the size, to check the file signature after upload. */
@@ -25,21 +34,49 @@ export interface Storage {
 
 let storage: Storage | undefined;
 
+function resolveSharePointForEnv(env: Record<string, string | undefined>) {
+  if (env === process.env) return getSharePoint();
+  const cfg = readSharePointConfig(env);
+  return cfg ? { cfg, client: createGraphClient(cfg) } : null;
+}
+
+export function resolveStorage(env: Record<string, string | undefined> = process.env): Storage {
+  const explicit = (env.STORAGE_BACKEND ?? "").trim().toLowerCase();
+
+  if (explicit === "sharepoint") {
+    const sp = resolveSharePointForEnv(env);
+    if (!sp) throw new Error("STORAGE_BACKEND=sharepoint but SharePoint env vars are not configured");
+    return createSharePointStorage(sp.client, sp.cfg);
+  }
+  if (explicit === "azure-blob" || explicit === "azure" || explicit === "blob") {
+    const cfg = readAzureBlobConfig(env);
+    if (!cfg) throw new Error("STORAGE_BACKEND=azure-blob but AZURE_STORAGE_ACCOUNT is not configured");
+    return createAzureBlobStorage(cfg, { env });
+  }
+  if (explicit === "local") {
+    if (env.NODE_ENV === "production" && env.ALLOW_LOCAL_STORAGE !== "1") {
+      throw new Error("STORAGE_BACKEND=local is not allowed in production");
+    }
+    return localStorage(LOCAL_ROOT);
+  }
+  if (explicit) {
+    throw new Error(`Unknown STORAGE_BACKEND "${explicit}": use azure-blob, sharepoint, or local`);
+  }
+
+  // Auto-select when STORAGE_BACKEND is unset: SharePoint -> Azure Blob -> local (non-prod only).
+  const sp = resolveSharePointForEnv(env);
+  if (sp) return createSharePointStorage(sp.client, sp.cfg);
+  const azureCfg = readAzureBlobConfig(env);
+  if (azureCfg) return createAzureBlobStorage(azureCfg, { env });
+
+  if (env.NODE_ENV === "production" && env.ALLOW_LOCAL_STORAGE !== "1") {
+    throw new Error("No file storage configured: set AZURE_STORAGE_ACCOUNT or SharePoint env vars");
+  }
+  return localStorage(LOCAL_ROOT);
+}
+
 export function getStorage(): Storage {
-  if (storage) return storage;
-  const sp = getSharePoint();
-  if (sp) {
-    storage = createSharePointStorage(sp.client, sp.cfg);
-    return storage;
-  }
-  if (process.env.BLOB_READ_WRITE_TOKEN) {
-    storage = blobStorage();
-    return storage;
-  }
-  if (process.env.NODE_ENV === "production" && process.env.ALLOW_LOCAL_STORAGE !== "1") {
-    throw new Error("No file storage configured: set SharePoint env vars or BLOB_READ_WRITE_TOKEN");
-  }
-  storage = localStorage(LOCAL_ROOT);
+  storage ??= resolveStorage();
   return storage;
 }
 
@@ -47,29 +84,6 @@ export function getStorage(): Storage {
 export function resetStorageCache() {
   storage = undefined;
   resetSharePointCache();
-}
-
-function blobStorage(): Storage {
-  return {
-    mode: "blob",
-    async get(key) {
-      const { get } = await import("@vercel/blob");
-      const res = await get(key, { access: "private" });
-      if (!res?.stream) return null;
-      return { stream: res.stream, size: res.blob.size ?? null, contentType: res.blob.contentType ?? null };
-    },
-    async head(key, n) {
-      const file = await this.get(key);
-      if (!file) return null;
-      const bytes = await readFirst(file.stream, n);
-      return { bytes, size: file.size ?? 0 };
-    },
-    async put(key, data, contentType) {
-      if (!parseUploadKey(key)) throw new Error("invalid storage key");
-      const { put } = await import("@vercel/blob");
-      await put(key, Buffer.from(data), { access: "private", contentType, addRandomSuffix: false, allowOverwrite: false });
-    },
-  };
 }
 
 // ---------------------------------------------------------------- local folder
@@ -114,22 +128,4 @@ export function localStorage(root: string): Storage {
 /** Local mode only (dev upload route). Refuses to overwrite. */
 export async function putLocal(key: string, data: Uint8Array) {
   await localStorage(LOCAL_ROOT).put(key, data, "application/octet-stream");
-}
-
-async function readFirst(stream: ReadableStream<Uint8Array>, n: number) {
-  const reader = stream.getReader();
-  const out = new Uint8Array(n);
-  let got = 0;
-  try {
-    while (got < n) {
-      const { value, done } = await reader.read();
-      if (done || !value) break;
-      const take = Math.min(n - got, value.length);
-      out.set(value.subarray(0, take), got);
-      got += take;
-    }
-  } finally {
-    await reader.cancel().catch(() => {});
-  }
-  return out.subarray(0, got);
 }

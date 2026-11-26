@@ -1,31 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { pgPoolConfig, selectPgDriver } from "./index";
+import { pgPoolConfig } from "./index";
 
-describe("PostgreSQL driver selection & TLS enforcement (Azure + Neon, SEC-01)", () => {
-  it("selects neon for *.neon.tech and pg for Azure / standard PostgreSQL", () => {
-    expect(selectPgDriver("postgresql://u:p@ep-cool-123.eu-central-1.aws.neon.tech/neondb?sslmode=require", "")).toBe("neon");
-    expect(selectPgDriver("postgresql://u:p@tmc-doccenter.postgres.database.azure.com:5432/tmc_document_center?sslmode=require", "")).toBe(
-      "pg",
-    );
-    expect(selectPgDriver("postgresql://u:p@localhost:5432/dev", "")).toBe("pg");
-  });
-
-  it("honors explicit DATABASE_DRIVER override", () => {
-    expect(selectPgDriver("postgresql://u:p@ep-1.neon.tech/db", "pg")).toBe("pg");
-    expect(selectPgDriver("postgresql://u:p@custom.host/db", "neon")).toBe("neon");
-  });
-
+describe("Azure PostgreSQL TLS enforcement (SEC-01)", () => {
   it("strips SSL query params and enforces verified TLS on Azure PostgreSQL in production", () => {
     const cfg = pgPoolConfig(
-      "postgresql://u:p@tmc-doccenter.postgres.database.azure.com/db?sslmode=require&application_name=dc",
+      "postgresql://u:p@tmc-doccenter-db.postgres.database.azure.com/tmc_document_center?sslmode=require&sslnegotiation=direct&application_name=dc",
       { NODE_ENV: "production" },
     );
     expect(cfg.ssl).toEqual({ rejectUnauthorized: true });
     expect(cfg.connectionString).not.toContain("sslmode");
+    expect(cfg.connectionString).not.toContain("sslnegotiation");
     expect(cfg.connectionString).toContain("application_name=dc");
 
     const libpqVerifyFull = pgPoolConfig(
-      "postgresql://u:p@tmc-doccenter.postgres.database.azure.com/db?uselibpqcompat=true&sslmode=verify-full",
+      "postgresql://u:p@tmc-doccenter-db.postgres.database.azure.com/tmc_document_center?uselibpqcompat=true&sslmode=verify-full",
       { NODE_ENV: "production" },
     );
     expect(libpqVerifyFull.ssl).toEqual({ rejectUnauthorized: true });

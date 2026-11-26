@@ -1,29 +1,117 @@
-# Azure hosting & SharePoint setup (Phase 4a)
+# Azure hosting, Azure Blob Storage & SharePoint setup (Phase 4a)
 
 Last updated: 26/11/2026
 
-This guide covers running the TMC Document Center on **Azure Container Apps** + **Azure Database for PostgreSQL**, connected to a **SharePoint document library** (test site `TMCDOCUMENTCENTER` now, live SharePoint DMS in January by changing two environment variables) and **Anthropic AI** on the worker.
+This guide covers running the TMC Document Center strictly on **Azure** (no Vercel, no Railway, no Neon):
+- **Azure Container Apps** (`tmc-doccenter-web` + `tmc-doccenter-worker`)
+- **Azure Database for PostgreSQL Flexible Server** (`tmc-doccenter-db`)
+- **Azure Blob Storage** (`tmcdoccenterstorage`, container `documents`, passwordless Entra Managed Identity) ready for immediate testing
+- **SharePoint document library** (`TMCDOCUMENTCENTER / Shared Documents` for test, live DMS in January) via Microsoft Graph `Sites.Selected`
+- **Anthropic AI** on `tmc-doccenter-worker` only
 
 ---
 
-## 1. Architecture on Azure (inside the TMC Logistics resource group)
+## 1. Live standalone Azure resources (`RG_TMC-Logistics`, `westeurope`)
 
-Azure does not have subgroups inside a resource group. Instead, place the Document Center resources in the existing TMC Logistics resource group with the prefix `tmc-doccenter-` and tag `app=tmc-document-center`:
+All Document Center resources are isolated from TMC Logistics with the `tmc-doccenter-` prefix and tag `app=tmc-document-center`:
 
-| Resource | Name proposal | Notes |
+| Resource | Name | Key settings |
 |---|---|---|
-| PostgreSQL database | `tmc_document_center` (own DB user) | Either on TMC Logistics' existing PostgreSQL Flexible Server (separate database + separate DB user) or a small Burstable B1ms server `tmc-doccenter-db` in EU (`westeurope`). TLS (`sslmode=require`) is enforced by the app. |
-| Web container app | `tmc-doccenter-web` | Built from `web/Dockerfile`. External HTTPS ingress on port `3000`, at least **1 GiB RAM** (for up to 100 MB supplier uploads). Runs `node /app/migrate/migrate.mjs` before starting Next.js. |
-| Worker container app | `tmc-doccenter-worker` | Built from `web/worker/Dockerfile`. **Internal** ingress only on port `8080`, max `1` replica (runs Python neutralizer, LibreOffice, Tesseract, and optional Anthropic AI reader). |
-| SharePoint library | `TMCDOCUMENTCENTER / Shared Documents` (test) | Accessed via Microsoft Graph using one Entra ID App Registration with `Sites.Selected` (Write) granted ONLY to this site. |
+| PostgreSQL Flexible Server | `tmc-doccenter-db` | `Standard_B1ms`, database `tmc_document_center`, `require_secure_transport = on` (verified TLS enforced by app), 14-day backups. |
+| Container Registry | `tmcdoccenteracr.azurecr.io` | Admin user disabled; pulls via `tmc-doccenter-id` (`AcrPull`). |
+| Container Apps Environment | `tmc-doccenter-env` | Linked to `tmc-doccenter-logs` (Log Analytics). |
+| Web container app | `tmc-doccenter-web` | Built from `web/Dockerfile`. External HTTPS ingress on port `3000`, `minReplicas: 0`, `maxReplicas: 3`, at least **1 GiB RAM** (for up to 100 MB supplier uploads). Runs `node /app/migrate/migrate.mjs` before starting Next.js. |
+| Worker container app | `tmc-doccenter-worker` | Built from `web/worker/Dockerfile`. **Internal** ingress only on port `8080`, `minReplicas: 0`, `maxReplicas: 1`. Runs Python neutralizer, LibreOffice, Tesseract, and optional Anthropic AI reader. |
+| Blob Storage | `tmcdoccenterstorage` | Container `documents`. Public access disabled, shared access keys disabled, TLS 1.2+ only, passwordless Entra RBAC (`Storage Blob Data Contributor`) via `tmc-doccenter-id`. |
+| User-Assigned Managed Identity | `tmc-doccenter-id` | Attached to both Container Apps (`AZURE_CLIENT_ID`). Grants `AcrPull` + `Storage Blob Data Contributor`. |
 
 Safety rules:
-- Never share a database user, secret, or app registration with TMC Logistics.
-- Never put secrets (`SHAREPOINT_CLIENT_SECRET`, `DATABASE_URL`, `AUTH_SECRET`, `WORKER_WAKE_SECRET`, `ANTHROPIC_API_KEY`) into git or chat: store them as Azure Container App secrets (or Key Vault references).
+- Never share a database user, secret, storage account, or Entra app registration with TMC Logistics.
+- Never put secrets (`DATABASE_URL`, `AUTH_SECRET`, `ADMIN_PASSWORD_HASH`, `WORKER_WAKE_SECRET`, `SHAREPOINT_CLIENT_SECRET`, `ANTHROPIC_API_KEY`) into git or chat: store them as Azure Container App secrets (or Key Vault references).
+- Never set `ANTHROPIC_API_KEY` on `tmc-doccenter-web` (worker only).
 
 ---
 
-## 2. How SharePoint is organized
+## 2. Switching between Azure Blob Storage (now) and SharePoint (once `Sites.Selected` is ready)
+
+File storage is controlled by `STORAGE_BACKEND` on **both** `tmc-doccenter-web` and `tmc-doccenter-worker`:
+
+| `STORAGE_BACKEND` | Behavior |
+|---|---|
+| `azure-blob` | Stores internal uploads, drafts, previews, editor views and supplier originals in `tmcdoccenterstorage / documents` using passwordless Entra Managed Identity (`AZURE_CLIENT_ID`). Works immediately before SharePoint IT approval. |
+| `sharepoint` | Stores internal app files in SharePoint `_app-storage/`, enables the Neutralise SharePoint order browser/importer, and auto-publishes Final PDF + Word (`_v1`, `_v2`, never overwriting; Hard Rule 4) to matching order folders (or `General/`). |
+| *(unset)* | Auto-selects SharePoint if configured, otherwise Azure Blob Storage if configured. Fails closed in production if neither is set. |
+
+Note: Even while `STORAGE_BACKEND=azure-blob`, if you later add the `SHAREPOINT_*` env vars, SharePoint order browsing and Final auto-publishing automatically become available alongside Blob Storage. Setting `STORAGE_BACKEND=sharepoint` moves internal app storage into SharePoint `_app-storage/` as well.
+
+---
+
+## 3. Environment variables on Azure Container Apps
+
+Set on **both** `tmc-doccenter-web` and `tmc-doccenter-worker`:
+- `DATABASE_URL` (secret: PostgreSQL connection string for `tmc-doccenter-db` / `tmc_document_center` with `?sslmode=require`)
+- `STORAGE_BACKEND=azure-blob` (switch to `sharepoint` when ready)
+- `AZURE_STORAGE_ACCOUNT=tmcdoccenterstorage`
+- `AZURE_STORAGE_CONTAINER=documents`
+- `AZURE_CLIENT_ID` (client ID of `tmc-doccenter-id`)
+- `WORKER_WAKE_SECRET` (secret, 32+ random characters)
+- When SharePoint `Sites.Selected` is ready, add:
+  - `SHAREPOINT_TENANT_ID`
+  - `SHAREPOINT_CLIENT_ID`
+  - `SHAREPOINT_CLIENT_SECRET` (secret)
+  - `SHAREPOINT_DRIVE_ID` (or `SHAREPOINT_SITE_ID`)
+  - Optional folder overrides: `SHAREPOINT_STORAGE_FOLDER` (default `_app-storage`), `SHAREPOINT_ORDERS_ROOT` (default empty = root), `SHAREPOINT_OUTPUT_SUBFOLDER` (default empty), `SHAREPOINT_GENERAL_FOLDER` (default `General`)
+
+Set on **`tmc-doccenter-web` only**:
+- `AUTH_SECRET` (secret, 32+ random characters)
+- `ADMIN_EMAIL`, `ADMIN_NAME`, `ADMIN_PASSWORD_HASH` (secret)
+- `WORKER_WAKE_URL` (internal URL of `tmc-doccenter-worker`, e.g. `https://tmc-doccenter-worker.internal.<env-domain>/wake`)
+- Optional API v1.1 for TMC Logistics: `API_CLIENTS_ENABLED=on`, `APP_URL=https://<web-fqdn>`, `DC_API_MAX_BODY_MB=100`
+
+Set on **`tmc-doccenter-worker` only**:
+- `AI_READER=on` (or leave unset to keep AI off)
+- `ANTHROPIC_API_KEY` (secret, from TMC's dedicated Anthropic workspace with a monthly spend cap)
+- `AI_READER_MODEL=claude-opus-5-5`, `AI_READER_EFFORT=medium`, `AI_READER_MAX_CALLS=3`, `AI_READER_DAILY_CALLS=30`, `AI_READER_TIMEOUT_S=120`
+
+---
+
+## 4. Build and deploy commands (Azure CLI)
+
+Run from the repository root (always deploy **worker before web**):
+
+```bash
+TAG=$(git rev-parse --short HEAD)
+
+# 1. Build both images directly in Azure Container Registry (no local Docker needed)
+az acr build --registry tmcdoccenteracr \
+  --image "tmc-doccenter-worker:$TAG" \
+  --file web/worker/Dockerfile .
+
+az acr build --registry tmcdoccenteracr \
+  --image "tmc-doccenter-web:$TAG" \
+  --file web/Dockerfile .
+
+# 2. Deploy worker first, then web (web runs Drizzle migrations automatically at startup)
+az containerapp update \
+  --resource-group RG_TMC-Logistics \
+  --name tmc-doccenter-worker \
+  --image "tmcdoccenteracr.azurecr.io/tmc-doccenter-worker:$TAG"
+
+az containerapp update \
+  --resource-group RG_TMC-Logistics \
+  --name tmc-doccenter-web \
+  --image "tmcdoccenteracr.azurecr.io/tmc-doccenter-web:$TAG"
+```
+
+Verify both apps are healthy:
+```bash
+WEB_FQDN=$(az containerapp show -g RG_TMC-Logistics -n tmc-doccenter-web --query properties.configuration.ingress.fqdn -o tsv)
+curl -fsS "https://$WEB_FQDN/api/v1/health"
+```
+
+---
+
+## 5. How SharePoint is organized (when enabled)
 
 Inside the configured SharePoint document library (`SHAREPOINT_DRIVE_ID` or `SHAREPOINT_SITE_ID`):
 
@@ -35,7 +123,7 @@ Inside the configured SharePoint document library (`SHAREPOINT_DRIVE_ID` or `SHA
 
 ---
 
-## 3. Entra ID App Registration & `Sites.Selected`
+## 6. Entra ID App Registration & `Sites.Selected`
 
 ### If you have Entra + SharePoint admin rights
 
@@ -95,31 +183,7 @@ Willem
 
 ---
 
-## 4. Environment variables on Azure Container Apps
-
-Set on **both** `tmc-doccenter-web` and `tmc-doccenter-worker`:
-- `DATABASE_URL` (PostgreSQL connection string with `?sslmode=require`)
-- `SHAREPOINT_TENANT_ID`
-- `SHAREPOINT_CLIENT_ID`
-- `SHAREPOINT_CLIENT_SECRET` (secret)
-- `SHAREPOINT_DRIVE_ID` (or `SHAREPOINT_SITE_ID`)
-- Optional folder overrides: `SHAREPOINT_STORAGE_FOLDER` (default `_app-storage`), `SHAREPOINT_ORDERS_ROOT` (default empty = root), `SHAREPOINT_OUTPUT_SUBFOLDER` (default empty), `SHAREPOINT_GENERAL_FOLDER` (default `General`)
-- `WORKER_WAKE_SECRET` (secret, 32+ random characters)
-
-Set on **`tmc-doccenter-web` only**:
-- `AUTH_SECRET` (secret, 32+ random characters)
-- `ADMIN_EMAIL`, `ADMIN_NAME`, `ADMIN_PASSWORD_HASH` (secret)
-- `WORKER_WAKE_URL` (internal URL of `tmc-doccenter-worker`, e.g. `https://tmc-doccenter-worker.internal.<env-domain>/wake`)
-- Optional API v1.1 for TMC Logistics: `API_CLIENTS_ENABLED=on`, `APP_URL=https://<web-url>`, `DC_API_MAX_BODY_MB=100`
-
-Set on **`tmc-doccenter-worker` only**:
-- `AI_READER=on` (or leave unset to keep AI off)
-- `ANTHROPIC_API_KEY` (secret, from TMC's dedicated Anthropic workspace with a spend limit)
-- `AI_READER_MODEL=claude-opus-5-5`, `AI_READER_EFFORT=medium`, `AI_READER_MAX_CALLS=3`, `AI_READER_DAILY_CALLS=30`, `AI_READER_TIMEOUT_S=120`
-
----
-
-## 5. Switching to the live SharePoint DMS in January
+## 7. Switching to the live SharePoint DMS in January
 
 No code changes are needed:
 1. Grant the existing `TMC Document Center` Entra app `Sites.Selected` (**write**) on the live SharePoint DMS site.

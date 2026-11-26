@@ -1,8 +1,9 @@
 # TMC Document Center worker: Node (job handling) + Python 3.11 (the engine) + LibreOffice
 # (Word -> PDF) + Tesseract/Ghostscript (OCR). Build from the repository root:
 #   docker build -f web/worker/Dockerfile .
-# Railway uses this file (railway.json); Azure Container Apps can use the same image later.
-FROM node:24-bookworm-slim
+# Azure Container Apps (tmc-doccenter-worker) runs this image.
+# Base image pinned by digest for reproducible builds (SEC-12 / M2).
+FROM node:24-bookworm-slim@sha256:873f586f3794f52281bd039bf02c048a0be08fde619338f9941bad1eb6b34530
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \

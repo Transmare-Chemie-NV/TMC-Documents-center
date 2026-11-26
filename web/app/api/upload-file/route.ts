@@ -1,7 +1,7 @@
-// Server-side upload route for SharePoint mode (Azure Container Apps: no 4.5 MB Vercel limit).
-// Browser never receives a Microsoft Graph token; this route enforces login (401 before mode),
+// Server-side upload route for Azure (Azure Blob Storage or SharePoint mode, up to 100 MB).
+// Browser never receives an Azure/Graph token; this route enforces login (401 before mode),
 // CSRF same-origin check, per-user rate limit, concurrency cap, early magic-byte check on the
-// first 8 bytes, wall-clock timeout, zero-copy buffer, and audit logging (SEC-02, SEC-08, SEC-10).
+// first 8 bytes, wall-clock timeout, zero-copy buffer, and audit logging.
 import { logAudit } from "@/lib/audit";
 import { apiUser } from "@/lib/auth";
 import { getDb } from "@/lib/db";
@@ -17,13 +17,13 @@ function json(body: unknown, status = 200, extra: Record<string, string> = {}) {
 }
 
 export async function POST(request: Request) {
-  // Check authentication BEFORE storage mode so unauthenticated callers cannot probe config (SEC-10).
+  // Check authentication BEFORE storage mode so unauthenticated callers cannot probe config.
   const user = await apiUser();
   if (!user) return new Response("Not logged in", { status: 401, headers: NO_STORE });
   if (!checkSameOrigin(request)) return json({ error: "forbidden origin" }, 403);
 
   const storage = getStorage();
-  if (storage.mode !== "sharepoint") {
+  if (storage.mode === "local") {
     return new Response("Not found", { status: 404, headers: NO_STORE });
   }
 
@@ -62,11 +62,12 @@ export async function POST(request: Request) {
       kind,
       size: read.bytes.byteLength,
       key,
+      backend: storage.mode,
     });
     return json({ key }, 200);
   } catch (err) {
     console.error("upload-file failed:", err instanceof Error ? err.name : typeof err);
-    return json({ error: "upload to SharePoint failed" }, 502);
+    return json({ error: "file upload failed" }, 502);
   } finally {
     release();
   }

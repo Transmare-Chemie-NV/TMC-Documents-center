@@ -22,7 +22,7 @@ export const MAX_WRITES_PER_MINUTE = 60;
 /** Calls with a refused key per address and minute, before the key is looked up (security review S6). */
 export const MAX_REFUSED_PER_MINUTE = 30;
 
-// Fixed one-minute windows per server instance (Vercel may run a few: approximate, Willem 27/10).
+// Fixed one-minute windows per server instance (Azure Container Apps may run multiple replicas: approximate).
 // New requests and open requests are counted exactly in the database (lib/api/requests.ts).
 type Window = Map<string, { start: number; n: number }>;
 const reads: Window = new Map();
@@ -77,43 +77,89 @@ export async function readJson(req: Request): Promise<unknown> {
 }
 
 /**
- * The largest body this platform takes or sends through a function, in MB (v1.1, contract 15.1 and
- * 15.3). Vercel Functions stop at about 4.5 MB, so 4 there; on Azure up to the file limits (100 / 25).
+ * The largest body this platform takes or sends through an API route, in MB (v1.1, contract 15.1
+ * and 15.3). Defaults to 100 MB on Azure Container Apps (Final PDFs stay capped at 25 MB in
+ * result-file.ts), configurable via DC_API_MAX_BODY_MB (clamped to 1..100).
  */
 export function platformMaxBytes(): number {
-  const mb = Number(process.env.DC_API_MAX_BODY_MB ?? 4);
-  // on Vercel a higher setting could never work: clamped, whatever is set (review L4)
-  const ceiling = process.env.VERCEL ? 4 : 100;
-  return Math.floor((Number.isFinite(mb) && mb > 0 ? Math.min(mb, ceiling) : 4) * 1024 * 1024);
+  const mb = Number(process.env.DC_API_MAX_BODY_MB ?? 100);
+  return Math.floor((Number.isFinite(mb) && mb > 0 ? Math.min(mb, 100) : 100) * 1024 * 1024);
 }
 
 /**
  * The raw body, exactly `Content-Length` bytes and at most `max`: the length is checked before a
- * byte is read, and again while reading (a body that runs past its own length is refused).
+ * byte is read, again while reading (with a wall-clock timeout and optional early magic-byte check
+ * on the first 8 bytes), and returned as a zero-copy Uint8Array view (H1).
  */
-export async function readBytes(req: Request, max: number): Promise<Uint8Array> {
+export async function readBytes(
+  req: Request,
+  max: number,
+  opts: { timeoutMs?: number; validateHead?: (head: Uint8Array) => boolean } = {},
+): Promise<Uint8Array> {
   const header = req.headers.get("content-length");
   if (!header || !/^\d{1,12}$/.test(header) || Number(header) < 1) throw new ApiError("length_required");
   const length = Number(header);
   if (length > max) throw new ApiError("payload_too_large");
+
+  const timeoutMs = opts.timeoutMs ?? 120_000;
+  const deadline = Date.now() + timeoutMs;
   // memory grows with what really arrives, never with what the header claims (review L4)
   const chunks: Uint8Array[] = [];
   let size = 0;
+  let headChecked = false;
+  const headBuf = new Uint8Array(8);
+  let headLen = 0;
+
   if (req.body) {
     const reader = req.body.getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (size + value.length > length) {
-        await reader.cancel();
-        throw new ApiError("payload_too_large");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      for (;;) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          await reader.cancel().catch(() => {});
+          throw new ApiError("unavailable", [], 5);
+        }
+        const next = await Promise.race([
+          reader.read(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new ApiError("unavailable", [], 5)), remaining);
+          }),
+        ]);
+        clearTimeout(timer);
+        timer = undefined;
+        if (next.done) break;
+        const value = next.value;
+        if (size + value.length > length) {
+          await reader.cancel().catch(() => {});
+          throw new ApiError("payload_too_large");
+        }
+        if (opts.validateHead && !headChecked) {
+          const take = Math.min(8 - headLen, value.length);
+          headBuf.set(value.subarray(0, take), headLen);
+          headLen += take;
+          if (headLen >= 8 || size + value.length === length) {
+            headChecked = true;
+            if (!opts.validateHead(headBuf.subarray(0, headLen))) {
+              await reader.cancel().catch(() => {});
+              throw new ApiError("unsupported_type");
+            }
+          }
+        }
+        chunks.push(value);
+        size += value.length;
       }
-      chunks.push(value);
-      size += value.length;
+    } catch (err) {
+      if (timer) clearTimeout(timer);
+      await reader.cancel().catch(() => {});
+      throw err;
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
   if (size !== length) throw new ApiError("invalid_payload", ["Content-Length"]);
-  return new Uint8Array(Buffer.concat(chunks));
+  const buf = Buffer.concat(chunks, size);
+  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 }
 
 /** Supplier document hand-offs per key and minute (contract 15.1), on top of the write limit. */

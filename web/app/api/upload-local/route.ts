@@ -1,4 +1,4 @@
-// Laptop only (no Vercel Blob): stores an upload in .data/files. Disabled online.
+// Laptop only (local storage): stores an upload in .data/files. Disabled in production.
 import { apiUser } from "@/lib/auth";
 import { detectType, MAX_FILE_MB, maxFileBytes, newUploadKey, USER_UPLOAD_KINDS, type FileKind } from "@/lib/files";
 import { getStorage, putLocal } from "@/lib/storage";

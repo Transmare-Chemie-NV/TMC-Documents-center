@@ -68,7 +68,7 @@ export default async function UsersPage({ searchParams }: PageProps<"/settings/u
             {users.length === 0 && (
               <tr>
                 <td colSpan={5} className="px-3 py-4 text-gray-500">
-                  No users yet. You log in with the admin account from the Vercel settings.
+                  No users yet. You log in with the admin account from the Azure Container App settings.
                 </td>
               </tr>
             )}

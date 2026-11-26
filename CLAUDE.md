@@ -23,11 +23,11 @@ Willem Manssens, AI lead at Transmare Chemie NV (TMC). He is not a developer: ex
 6. Tests in `engine/tests/` must keep passing. Add tests for new logic.
 
 ## Architecture guard rails
-- The Next.js app must not run Python/OCR/LibreOffice in serverless functions. The engine runs in a separate worker (`worker/`) that polls the `job` table.
-- Storage, auth and queue sit behind small interfaces (`lib/storage`, `lib/auth`, `lib/jobs`) so Vercel → Azure is configuration, not a rebuild.
-- On Vercel, use test/sample documents only until Willem confirms otherwise.
-- Pilot runs on Willem's Vercel **Hobby** account: keep usage small (no cron jobs, no heavy functions).
-- Pilot login is a simple password login (`lib/auth`), no Entra. Build it so Microsoft Entra can replace it in phase 4 without touching the pages.
+- The Next.js app must not run Python/OCR/LibreOffice in web request handlers. The engine runs in a separate worker (`tmc-doccenter-worker`) on Azure Container Apps that polls the `job` table and wakes via internal `POST /wake`.
+- Storage, auth and queue sit behind small interfaces (`lib/storage`, `lib/auth`, `lib/jobs`). Hosting is pure **Azure** (Azure Container Apps + Azure Database for PostgreSQL + Azure Blob Storage / SharePoint via Microsoft Graph); no Vercel, Railway or Neon.
+- Internal app files (uploads, drafts, supplier originals) stay strictly inside private Azure Blob Storage (`tmcdoccenterstorage`) or SharePoint `_app-storage/`, never mixed with published customer-facing TMC files.
+- Keep `minReplicas: 0` friendly behavior (no unnecessary background polling when idle; `tmc-doccenter-worker` capped at `maxReplicas: 1`).
+- Login is currently password login (`lib/auth`) behind HTTPS; Microsoft Entra ID SSO will replace it cleanly via `lib/auth` without touching pages.
 
 ## Style
 - UI: TMC navy `#213371`, TMC logo (`engine/assets/logo.png`), clean, phone-friendly. Dates dd/mm/yyyy.

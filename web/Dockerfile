@@ -17,11 +17,11 @@ ENV NEXT_TELEMETRY_DISABLED=1 \
 # Placeholder secret scoped strictly to the build RUN command (never persisted in image ENV layers, SEC-12).
 RUN AUTH_SECRET=build-only-placeholder-secret-never-used-at-runtime-000 npx next build
 
-# Minimal isolated dependencies for scripts/migrate.mjs only (keeps standalone node_modules pruned, SEC-12).
+# Minimal lockfile-verified dependencies for scripts/migrate.mjs only (keeps standalone node_modules pruned, SEC-12 / M2).
 FROM node:24-bookworm-slim@sha256:873f586f3794f52281bd039bf02c048a0be08fde619338f9941bad1eb6b34530 AS migrator-deps
 WORKDIR /app/migrate
-RUN npm init -y >/dev/null 2>&1 \
- && npm install --omit=dev --ignore-scripts --no-audit --no-fund drizzle-orm@0.45.4 pg@8.23.1 @neondatabase/serverless@1.2.0 \
+COPY web/scripts/migrate/package.json web/scripts/migrate/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
  && npm cache clean --force
 
 FROM node:24-bookworm-slim@sha256:873f586f3794f52281bd039bf02c048a0be08fde619338f9941bad1eb6b34530 AS runner
@@ -36,10 +36,11 @@ COPY --from=builder /app/web/.next/standalone ./
 COPY --from=builder /app/web/.next/static ./.next/static
 COPY --from=builder /app/web/public ./public
 COPY --from=builder /app/web/drizzle ./drizzle
-# Isolated migration runner in /app/migrate so standalone node_modules stays minimal (no pglite/tsx/blob).
+# Isolated migration runner in /app/migrate so standalone node_modules stays minimal (no pglite/tsx).
 COPY --from=migrator-deps /app/migrate/node_modules /app/migrate/node_modules
-COPY --from=builder /app/web/scripts/migrate.mjs /app/migrate/migrate.mjs
+COPY --from=builder /app/web/scripts/migrate.mjs /app/migrate/scripts/migrate.mjs
+COPY --from=builder /app/web/lib/db/pg-config.mjs /app/migrate/lib/db/pg-config.mjs
 
 USER node
 EXPOSE 3000
-CMD ["sh", "-c", "node /app/migrate/migrate.mjs && exec node server.js"]
+CMD ["sh", "-c", "node /app/migrate/scripts/migrate.mjs && exec node server.js"]

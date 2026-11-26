@@ -38,8 +38,8 @@ export default async function PasswordPage({ searchParams }: PageProps<"/account
         <Notice error={sp.error} />
         {user.source === "env" ? (
           <p className="mt-4 text-sm text-gray-700">
-            This admin account&apos;s password is set in the Vercel settings (ADMIN_PASSWORD_HASH). Change it there with{" "}
-            <code>npm run hash-password</code>.
+            This admin account&apos;s password is set in the Azure Container App settings (ADMIN_PASSWORD_HASH). Change it there
+            with <code>npm run hash-password</code>.
           </p>
         ) : (
           <form action={changePassword} className="mt-4 space-y-4 rounded-lg bg-white p-6 shadow-sm ring-1 ring-black/5">

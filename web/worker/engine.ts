@@ -141,12 +141,15 @@ export function cleanLog(log: string, workDir: string) {
     ["SHAREPOINT_CLIENT_SECRET", "<secret>"],
     ["WORKER_WAKE_SECRET", "<secret>"],
     ["AUTH_SECRET", "<secret>"],
+    ["IDENTITY_HEADER", "<secret>"],
   ];
   for (const [envName, label] of secrets) {
     const raw = process.env[envName] ?? "";
     for (const secret of new Set([raw.trim(), raw])) if (secret.length >= 8) out = out.split(secret).join(label);
   }
-  out = out.replace(/postgres(?:ql)?:\/\/[^\s"'<>]+/gi, "<db-url>");
+  out = out
+    .replace(/postgres(?:ql)?:\/\/[^\s"'<>]+/gi, "<db-url>")
+    .replace(/\bBearer\s+[A-Za-z0-9\-._~+/]+=*/gi, "Bearer <token>");
   return out.length > LOG_MAX ? `…${out.slice(-LOG_MAX)}` : out;
 }
 

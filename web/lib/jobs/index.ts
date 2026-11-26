@@ -270,12 +270,13 @@ export async function wakeWorker() {
   // The secret only travels over https (plain http allowed on a laptop), and never follows a redirect.
   if (!url.startsWith("https://") && process.env.NODE_ENV === "production") return;
   try {
-    await fetch(url, {
+    const res = await fetch(url, {
       method: "POST",
       headers: { authorization: `Bearer ${secret}` },
       redirect: "manual",
-      signal: AbortSignal.timeout(2000),
+      signal: AbortSignal.timeout(5000),
     });
+    await res.body?.cancel().catch(() => {});
   } catch {
     // ignored on purpose
   }
