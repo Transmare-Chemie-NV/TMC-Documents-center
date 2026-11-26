@@ -104,6 +104,26 @@ export function DocEditor({ src, pending, onState, ref }: Props) {
     1 + Math.max(-1, ...(pending?.tables ?? []).flatMap((t) => t.ops.flatMap((o) => ("ids" in o ? o.ids : []))).map((i) => Number(i?.slice(1) ?? -1))),
   );
   const [notice, setNotice] = useState("");
+  const [fitWidth, setFitWidth] = useState(true);
+  const [hostWidth, setHostWidth] = useState(0);
+
+  useEffect(() => {
+    const el = host.current;
+    if (!el) return;
+    const measure = () => {
+      const next = Math.round(el.clientWidth);
+      setHostWidth((prev) => (Math.abs(prev - next) > 2 ? next : prev));
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const pageWidthMm = dim(view?.page.width) ?? 210;
+  const pagePx = pageWidthMm * (96 / 25.4);
+  const scale = fitWidth && hostWidth > 0 && hostWidth - 24 < pagePx ? Math.max(0.45, Math.min(1, (hostWidth - 24) / pagePx)) : 1;
 
   useImperativeHandle(
     ref,
@@ -247,7 +267,7 @@ export function DocEditor({ src, pending, onState, ref }: Props) {
     const at = sel?.anchorNode ?? null;
     const next =
       marked.find((e) => at && !e.contains(at) && at.compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING) ?? marked[0];
-    next.scrollIntoView({ block: "center" });
+    next.scrollIntoView({ block: "center", inline: "nearest" });
     next.closest<HTMLElement>("[data-g]")?.focus({ preventScroll: true }); // typing goes there
     const range = document.createRange();
     range.selectNodeContents(next);
@@ -315,14 +335,28 @@ export function DocEditor({ src, pending, onState, ref }: Props) {
         <button type="button" className={tool} onMouseDown={keep} onClick={undoTable}>
           Undo table change
         </button>
+        <span className="mx-1 h-5 w-px bg-gray-300" aria-hidden />
+        <button
+          type="button"
+          className={tool}
+          onMouseDown={keep}
+          onClick={() => setFitWidth((f) => !f)}
+          title="Switch between fitting the full page width and 100% A4 zoom"
+        >
+          {fitWidth ? "Zoom: Fit" : "Zoom: 100%"}
+        </button>
         {notice && (
           <span role="status" className="text-sm text-amber-800">
             {notice}
           </span>
         )}
       </div>
-      <div ref={host} className="h-[75vh] overflow-auto bg-gray-100 p-3">
-        <TablesContext value={tableOps}>{view && <Page key={pendingKey} view={view} pending={pending} />}</TablesContext>
+      <div ref={host} className="h-[75vh] overflow-auto bg-gray-100 p-3" style={{ scrollbarGutter: "stable" }}>
+        <div style={{ zoom: scale < 1 ? scale : undefined }}>
+          <TablesContext value={tableOps}>
+            {view && <Page key={pendingKey} view={view} pending={pending} />}
+          </TablesContext>
+        </div>
       </div>
     </div>
   );

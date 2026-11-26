@@ -16,8 +16,10 @@ jobs:
       run:
         working-directory: engine
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
       - name: System tools (LibreOffice, Tesseract, Ghostscript, poppler)
@@ -91,6 +93,15 @@ jobs:
           cat ai.log
           [ $status -eq 0 ] || echo "::error title=AI reader::$(grep -E 'XX|Traceback|Error' ai.log | head -5 | tr '\n' ' ')"
           exit $status
+      - name: Scanned bordered tables (real OCR + scan_grid) & wrapped multi-line AI verification
+        shell: bash
+        run: |
+          set +e
+          python tests/test_scan_grid_and_wrapped_ai.py > scangrid.log 2>&1
+          status=$?
+          cat scangrid.log
+          [ $status -eq 0 ] || echo "::error title=Scan grid & wrapped AI::$(grep -E 'XX|Traceback|Error' scangrid.log | head -5 | tr '\n' ' ')"
+          exit $status
       - name: COA batches side by side, duplicate lots, page markers, batch guard
         shell: bash
         run: |
@@ -127,7 +138,7 @@ jobs:
           python tests/test_scan_and_batches.py | tee scan.log
           ! grep -q "FAIL" scan.log
       # The worker with the real engine: supplier COA in, TMC draft out (web/worker/worker.test.ts)
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 24
           cache: npm
@@ -150,7 +161,9 @@ jobs:
   worker-image:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - name: Build the worker Docker image (as Azure Container Apps will)
         shell: bash
         run: |
@@ -180,8 +193,10 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 24
           cache: npm
@@ -196,7 +211,9 @@ jobs:
   web-image:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - name: Build the web Docker image (as Azure Container Apps will)
         shell: bash
         run: |

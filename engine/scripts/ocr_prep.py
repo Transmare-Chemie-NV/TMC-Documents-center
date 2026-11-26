@@ -119,42 +119,85 @@ def is_scanned(pdf_path, min_chars=80):
     return len(text.strip()) < min_chars * max(1, len(text) // 1)
 
 
-def searchable_copy(pdf_path, out_path=None, dpi=DPI, clean=True, psm="6"):
+MAX_OCR_PAGES = 15
+MAX_OCR_PAGE_DIM_PX = 4000
+MAX_OCR_RENDER_PIXELS = 12_000_000
+
+
+def searchable_copy(pdf_path, out_path=None, dpi=DPI, clean=True, psm="6",
+                    max_pages=MAX_OCR_PAGES, total_timeout_s=180):
     """-> path to a searchable PDF, or None when OCR is unavailable."""
     if pymupdf is None or not shutil.which("tesseract"):
         return None
-    out_path = out_path or tempfile.mktemp(suffix="_ocr.pdf", prefix="tmc_")
+    import math
+    import time
+
+    if not out_path:
+        fd, out_path = tempfile.mkstemp(suffix="_ocr.pdf", prefix="tmc_")
+        os.close(fd)
     tmp = tempfile.mkdtemp(prefix="tmc_ocr_")
     parts = []
+    doc = None
+    deadline = time.monotonic() + total_timeout_s
     try:
         doc = pymupdf.open(pdf_path)
-        for pno, page in enumerate(doc):
-            pix = page.get_pixmap(dpi=dpi)
+        for pno in range(min(len(doc), max_pages)):
+            remaining = deadline - time.monotonic()
+            if remaining <= 2:
+                return None
+            page = doc[pno]
+            rw, rh = float(page.rect.width), float(page.rect.height)
+            if rw <= 0 or rh <= 0:
+                continue
+            scale = dpi / 72.0
+            max_dim = max(rw, rh)
+            if max_dim * scale > MAX_OCR_PAGE_DIM_PX:
+                scale = MAX_OCR_PAGE_DIM_PX / max_dim
+            est = (rw * scale) * (rh * scale)
+            if est > MAX_OCR_RENDER_PIXELS:
+                scale *= math.sqrt(MAX_OCR_RENDER_PIXELS / est)
+            if scale < 0.5:
+                continue
+            eff_dpi = max(72, int(round(scale * 72)))
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale))
             img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
             if clean:
                 img = _clean_page(img)
             png = os.path.join(tmp, f"p{pno:03d}.png")
-            img.save(png, dpi=(dpi, dpi))
+            img.save(png, dpi=(eff_dpi, eff_dpi))
             stem = os.path.join(tmp, f"p{pno:03d}")
             r = subprocess.run(
                 ["tesseract", png, stem, "-l", "eng", "--psm", psm,
                  "-c", "preserve_interword_spaces=1", "pdf"],
-                capture_output=True, timeout=300)
+                capture_output=True, timeout=min(120, max(5, int(remaining))))
             if r.returncode != 0 or not os.path.exists(stem + ".pdf"):
                 return None
             parts.append(stem + ".pdf")
-        doc.close()
+        if not parts:
+            return None
 
         merged = pymupdf.open()
-        for p in parts:
-            with pymupdf.open(p) as s:
-                merged.insert_pdf(s)
-        merged.save(out_path)
-        merged.close()
+        try:
+            for p in parts:
+                with pymupdf.open(p) as s:
+                    merged.insert_pdf(s)
+            merged.save(out_path)
+        finally:
+            merged.close()
         return out_path
     except Exception:
+        try:
+            if out_path and os.path.exists(out_path):
+                os.remove(out_path)
+        except OSError:
+            pass
         return None
     finally:
+        if doc is not None:
+            try:
+                doc.close()
+            except Exception:
+                pass
         shutil.rmtree(tmp, ignore_errors=True)
 
 

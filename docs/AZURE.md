@@ -75,7 +75,28 @@ Set on **`tmc-doccenter-worker` only**:
 
 ---
 
-## 4. Build and deploy commands (Azure CLI)
+## 4. Automatic deploy from GitHub to Azure Container Apps (OIDC, passwordless)
+
+`.github/workflows/deploy-azure.yml` automatically builds and pushes both images to `tmcdoccenteracr.azurecr.io`, updates **`tmc-doccenter-worker`** first and **`tmc-doccenter-web`** second, and checks `/api/v1/health` whenever `checks` passes on `main` (or when run manually on `main`).
+
+### One-time least-privilege Azure OIDC setup (zero blast radius on TMC Logistics)
+
+1. Create a dedicated User-Assigned Managed Identity **`tmc-doccenter-deploy-id`** in `RG_TMC-Logistics` (`westeurope`) with tag `app=tmc-document-center`.
+2. Add one Federated Identity Credential on `tmc-doccenter-deploy-id`:
+   - Issuer: `https://token.actions.githubusercontent.com`
+   - Subject: `repo:Transmare-Chemie-NV/TMC-Documents-center:environment:azure-production`
+   - Audience: `api://AzureADTokenExchange`
+3. Assign least-privilege roles scoped **strictly to the 4 Document Center resources only** (never the whole resource group, never TMC Logistics, never PostgreSQL or Blob Storage):
+   - `AcrPush` on `tmcdoccenteracr`
+   - `Contributor` on `tmc-doccenter-worker`
+   - `Contributor` on `tmc-doccenter-web`
+   - `Managed Identity Operator` on `tmc-doccenter-id`
+4. In GitHub (`Settings > Environments`), create environment **`azure-production`** restricted strictly to branch **`main`**, and add 3 Environment secrets (non-password IDs):
+   - `AZURE_CLIENT_ID` (clientId of `tmc-doccenter-deploy-id`)
+   - `AZURE_TENANT_ID`
+   - `AZURE_SUBSCRIPTION_ID`
+
+### Manual build and deploy commands (Azure CLI fallback)
 
 Run from the repository root (always deploy **worker before web**):
 

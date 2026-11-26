@@ -1,0 +1,210 @@
+# Auto-deploys TMC Document Center to Azure Container Apps via passwordless GitHub OIDC.
+# Runs automatically after the `checks` workflow succeeds on `main`, or on manual dispatch
+# from `main`. Always deploys `tmc-doccenter-worker` BEFORE `tmc-doccenter-web` (docs/API.md).
+#
+# Required GitHub Environment (`azure-production`, restricted to `main` branch):
+#   Secrets: AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
+# See docs/AZURE.md for the one-time least-privilege Azure OIDC setup.
+name: deploy-azure
+
+on:
+  workflow_run:
+    workflows: ["checks"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-azure-production
+  cancel-in-progress: false
+
+# Root permissions locked empty; only the deploy job gets OIDC + read (M-4).
+permissions: {}
+
+env:
+  AZURE_RESOURCE_GROUP: RG_TMC-Logistics
+  ACR_NAME: tmcdoccenteracr
+  WORKER_APP: tmc-doccenter-worker
+  WEB_APP: tmc-doccenter-web
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: azure-production
+    permissions:
+      id-token: write
+      contents: read
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.conclusion == 'success')
+    steps:
+      - name: Determine exact commit SHA
+        id: sha
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          CTX_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            FULL_SHA="$RUN_HEAD_SHA"
+          else
+            FULL_SHA="$CTX_SHA"
+          fi
+          if ! [[ "$FULL_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid commit SHA" >&2
+            exit 1
+          fi
+          echo "full=$FULL_SHA" >> "$GITHUB_OUTPUT"
+          echo "short=${FULL_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Guard against stale-commit rollback on main (M-2)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          FULL_SHA: ${{ steps.sha.outputs.full }}
+        run: |
+          set -euo pipefail
+          MAIN_TIP=$(gh api "repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
+          if [ "$FULL_SHA" != "$MAIN_TIP" ]; then
+            echo "::notice::Skipping deploy: commit ${FULL_SHA:0:7} is superseded by current main tip ${MAIN_TIP:0:7}."
+            exit 1
+          fi
+
+      - name: Checkout verified commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ steps.sha.outputs.full }}
+          persist-credentials: false
+
+      - name: Verify OIDC configuration
+        shell: bash
+        env:
+          CID: ${{ secrets.AZURE_CLIENT_ID }}
+          TID: ${{ secrets.AZURE_TENANT_ID }}
+          SID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CID" ] || [ -z "$TID" ] || [ -z "$SID" ]; then
+            echo "::error::Missing AZURE_CLIENT_ID, AZURE_TENANT_ID, or AZURE_SUBSCRIPTION_ID in the azure-production GitHub environment. Follow docs/AZURE.md section 4."
+            exit 1
+          fi
+
+      - name: Azure OIDC login (passwordless)
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to Azure Container Registry
+        shell: bash
+        run: az acr login --name "$ACR_NAME"
+
+      - name: Build and push worker image (capture immutable digest)
+        id: worker_img
+        shell: bash
+        env:
+          TAG: ${{ steps.sha.outputs.short }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file web/worker/Dockerfile \
+            --tag "${ACR_NAME}.azurecr.io/${WORKER_APP}:${TAG}" \
+            --cache-from type=gha,scope=tmc-worker \
+            --cache-to type=gha,mode=max,scope=tmc-worker \
+            --metadata-file /tmp/worker-meta.json \
+            --push .
+          DIGEST=$(jq -r '.["containerimage.digest"]' /tmp/worker-meta.json)
+          if ! [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Missing valid worker image digest" >&2
+            exit 1
+          fi
+          echo "ref=${ACR_NAME}.azurecr.io/${WORKER_APP}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push web image (capture immutable digest)
+        id: web_img
+        shell: bash
+        env:
+          TAG: ${{ steps.sha.outputs.short }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file web/Dockerfile \
+            --tag "${ACR_NAME}.azurecr.io/${WEB_APP}:${TAG}" \
+            --cache-from type=gha,scope=tmc-web \
+            --cache-to type=gha,mode=max,scope=tmc-web \
+            --metadata-file /tmp/web-meta.json \
+            --push .
+          DIGEST=$(jq -r '.["containerimage.digest"]' /tmp/web-meta.json)
+          if ! [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Missing valid web image digest" >&2
+            exit 1
+          fi
+          echo "ref=${ACR_NAME}.azurecr.io/${WEB_APP}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy worker first by immutable digest (docs/API.md deploy order)
+        shell: bash
+        env:
+          IMAGE_REF: ${{ steps.worker_img.outputs.ref }}
+        run: |
+          set -euo pipefail
+          az containerapp update \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$WORKER_APP" \
+            --image "$IMAGE_REF"
+
+      - name: Deploy web second by immutable digest (runs Drizzle migrations at startup)
+        shell: bash
+        env:
+          IMAGE_REF: ${{ steps.web_img.outputs.ref }}
+        run: |
+          set -euo pipefail
+          az containerapp update \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$WEB_APP" \
+            --image "$IMAGE_REF"
+
+      - name: Verify live /api/v1/health endpoint
+        shell: bash
+        env:
+          SHORT_SHA: ${{ steps.sha.outputs.short }}
+          WORKER_REF: ${{ steps.worker_img.outputs.ref }}
+          WEB_REF: ${{ steps.web_img.outputs.ref }}
+        run: |
+          set -euo pipefail
+          FQDN=$(az containerapp show \
+            --resource-group "$AZURE_RESOURCE_GROUP" \
+            --name "$WEB_APP" \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          if [ -z "$FQDN" ]; then
+            echo "::error::Could not determine web FQDN"
+            exit 1
+          fi
+          URL="https://${FQDN}"
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 10 "${URL}/api/v1/health" | grep -q '"ok":true'; then
+              echo "Health check OK: ${URL}/api/v1/health"
+              {
+                echo "### Deployed TMC Document Center to Azure"
+                echo "- Commit: \`${SHORT_SHA}\`"
+                echo "- Live webpage: ${URL}"
+                echo "- Worker: \`${WORKER_REF}\`"
+                echo "- Web: \`${WEB_REF}\`"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::Health check failed on ${URL}/api/v1/health after 90s"
+          exit 1

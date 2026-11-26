@@ -20,7 +20,8 @@ COPY engine/requirements.txt engine/requirements.txt
 RUN python3 -m venv /opt/engine \
  && /opt/engine/bin/pip install --no-cache-dir -r engine/requirements.txt
 ENV ENGINE_PYTHON=/opt/engine/bin/python \
-    ENGINE_DIR=/app/engine
+    ENGINE_DIR=/app/engine \
+    PATH="/opt/engine/bin:${PATH}"
 
 # Worker dependencies (cached unless package-lock.json changes)
 COPY web/package.json web/package-lock.json web/
