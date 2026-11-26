@@ -5,6 +5,7 @@ import { requireUser } from "@/lib/auth";
 import { getDb } from "@/lib/db";
 import { listEntities } from "@/lib/entities";
 import { listJobs } from "@/lib/jobs";
+import { isSharePointConfigured } from "@/lib/sharepoint";
 import { getStorage } from "@/lib/storage";
 import Link from "next/link";
 import { AutoRefresh } from "@/app/jobs/auto-refresh";
@@ -22,6 +23,7 @@ export default async function NeutralisePage() {
   const open = rows.some(({ job }) => job.state === "queued" || job.state === "running");
   // requests from TMC Logistics a person still has to act on (API v1)
   const waiting = (await listRequests(db, { openOnly: true, limit: 200 })).filter((r) => r.state === "waiting-input" || r.state === "failed");
+  const sharePointEnabled = isSharePointConfigured();
   return (
     <PageShell user={user}>
       <h1 className="text-xl font-semibold text-tmc">Neutralise supplier documents</h1>
@@ -41,7 +43,7 @@ export default async function NeutralisePage() {
           <RequestsTable rows={waiting.slice(0, 20)} />
         </section>
       )}
-      <NeutraliseForm uploadMode={getStorage().mode} entitiesWithDetails={ready} />
+      <NeutraliseForm uploadMode={getStorage().mode} entitiesWithDetails={ready} sharePointEnabled={sharePointEnabled} />
 
       <div className="mt-10 flex flex-wrap items-baseline justify-between gap-2">
         <h2 className="text-lg font-semibold text-tmc">Sent to the neutralizer</h2>

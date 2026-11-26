@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useSyncExternalStore } from "react";
-import { sendFile } from "@/lib/client-upload";
+import { sendFile, type UploadMode } from "@/lib/client-upload";
 import type { YellowPart } from "@/lib/db/schema";
 import type { DocType, Entity } from "@/lib/constants";
 import { MAX_FILE_MB, maxFileBytes } from "@/lib/files";
@@ -19,7 +19,7 @@ type Props = {
   parts: YellowPart[];
   hasPdf: boolean;
   busy: boolean;
-  uploadMode: "blob" | "local";
+  uploadMode: UploadMode;
   initial: { productName: string; fileNr: string; batch: string };
   naming: { type: DocType; entity: Entity; batchLocked: boolean; language: string; currentName: string };
   edit: EditProps;

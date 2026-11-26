@@ -14,6 +14,7 @@ import { getDb } from "@/lib/db";
 import { listEntities } from "@/lib/entities";
 import { formatBytes, formatDateTime } from "@/lib/format";
 import { listJobs } from "@/lib/jobs";
+import { isSharePointConfigured } from "@/lib/sharepoint";
 import { getStorage } from "@/lib/storage";
 import { REQUEST_KIND, REQUEST_STATE } from "../requests-table";
 import { startHandedOver } from "./actions";
@@ -132,6 +133,7 @@ export default async function RequestPage({ params, searchParams }: PageProps<"/
             uploadMode={getStorage().mode}
             entitiesWithDetails={(await listEntities(db)).map((e) => e.code)}
             request={{ id: req.id, route, entity: req.entity, orderNo: req.orderNo, lines: req.lines, supplierName: req.supplierName }}
+            sharePointEnabled={isSharePointConfigured()}
           />
         </>
       )}

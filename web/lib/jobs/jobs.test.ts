@@ -132,4 +132,14 @@ describe("createJobs", () => {
     await expect(createJobs(db, storage, user, [job({ batch: "x".repeat(101) })])).rejects.toThrow(JobError);
     await expect(createJobs(db, storage, user, [job({ route: "label" as "coa" })])).rejects.toThrow(JobError);
   });
+
+  it("validates sharepointFolderPath and refuses traversal, General, or internal storage paths", async () => {
+    for (const bad of ["../outside", "_app-storage", "_app-storage/uploads/abc", "General", "General/840.S0850", "a\\b"]) {
+      await expect(createJobs(db, storage, user, [job({ sharepointFolderPath: bad })])).rejects.toThrow(/SharePoint folder/);
+    }
+    const ids = await createJobs(db, storage, user, [job({ sharepointFolderPath: "Orders/2026/840.S0850" })]);
+    expect(ids).toHaveLength(1);
+    const [row] = await db.select().from(jobs);
+    expect(row.sharepointFolderPath).toBe("Orders/2026/840.S0850");
+  });
 });

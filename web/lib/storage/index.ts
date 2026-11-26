@@ -1,29 +1,52 @@
-// File storage behind one small interface. Online: Vercel Blob (private files).
-// Laptop: a folder (.data/files). Azure later: a SharePoint library via Graph, same interface.
+// File storage behind one small interface.
+// Azure: SharePoint document library via Microsoft Graph (mode: "sharepoint").
+// Vercel: Vercel Blob private files (mode: "blob").
+// Laptop and tests: a local folder .data/files (mode: "local").
 import "server-only";
 import { createReadStream } from "node:fs";
 import { mkdir, open, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { parseUploadKey } from "../files";
+import { createSharePointStorage, getSharePoint, resetSharePointCache } from "../sharepoint";
 
+export type StorageMode = "blob" | "local" | "sharepoint";
 export type StoredFile = { stream: ReadableStream<Uint8Array>; size: number | null; contentType: string | null };
 
 export interface Storage {
-  /** "blob": browser uploads straight to Vercel Blob. "local": browser posts to /api/upload-local. */
-  readonly mode: "blob" | "local";
+  /** "blob": browser uploads straight to Vercel Blob. "sharepoint": browser posts to /api/upload-file. "local": /api/upload-local. */
+  readonly mode: StorageMode;
   get(key: string): Promise<StoredFile | null>;
   /** First `n` bytes and the size, to check the file signature after upload. */
   head(key: string, n: number): Promise<{ bytes: Uint8Array; size: number } | null>;
-  /** Stores a new file (the worker's results). Refuses to overwrite. */
+  /** Stores a new file (the worker's results or server uploads). Refuses to overwrite. */
   put(key: string, data: Uint8Array, contentType: string): Promise<void>;
 }
 
 let storage: Storage | undefined;
 
 export function getStorage(): Storage {
-  storage ??= process.env.BLOB_READ_WRITE_TOKEN ? blobStorage() : localStorage(LOCAL_ROOT);
+  if (storage) return storage;
+  const sp = getSharePoint();
+  if (sp) {
+    storage = createSharePointStorage(sp.client, sp.cfg);
+    return storage;
+  }
+  if (process.env.BLOB_READ_WRITE_TOKEN) {
+    storage = blobStorage();
+    return storage;
+  }
+  if (process.env.NODE_ENV === "production" && process.env.ALLOW_LOCAL_STORAGE !== "1") {
+    throw new Error("No file storage configured: set SharePoint env vars or BLOB_READ_WRITE_TOKEN");
+  }
+  storage = localStorage(LOCAL_ROOT);
   return storage;
+}
+
+/** Resets cached storage instance (used in tests when env vars change). */
+export function resetStorageCache() {
+  storage = undefined;
+  resetSharePointCache();
 }
 
 function blobStorage(): Storage {
