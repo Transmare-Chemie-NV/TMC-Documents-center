@@ -1189,8 +1189,8 @@ def cmd_preview(docx, out, engine_scripts):
             c.drawCentredString(0, 0, "DRAFT - NOT FOR USE")
             c.save()
             buf.seek(0)
-            page.merge_page(PdfReader(buf).pages[0])
-            writer.add_page(page)
+            target = writer.add_page(page)
+            target.merge_page(PdfReader(buf).pages[0])
         with open(out, "wb") as f:
             writer.write(f)
 
