@@ -192,3 +192,20 @@ jobs:
       - run: npm run build
         env:
           AUTH_SECRET: ci-only-placeholder-secret-not-used-anywhere-000
+
+  web-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build the web Docker image (as Azure Container Apps will)
+        shell: bash
+        run: |
+          set +e
+          docker build --progress=plain -f web/Dockerfile -t tmc-web . > build.log 2>&1
+          status=$?
+          cat build.log
+          if [ $status -ne 0 ]; then
+            msg=$(tail -40 build.log | sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g')
+            echo "::error title=Web Docker build::$msg"
+          fi
+          exit $status
