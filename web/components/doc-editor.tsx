@@ -46,16 +46,86 @@ type Props = {
   /** the person's last edit that did not become Final, shown again */
   pending: Edits | null;
   onState: (s: DocEditorState) => void;
+  /** live count of remaining yellow parts in the editor DOM */
+  onYellowCount?: (n: number) => void;
   ref: Ref<DocEditorHandle>;
 };
 
-export function DocEditor({ src, pending, onState, ref }: Props) {
+const CLEAR_BG = new Set([
+  "",
+  "transparent",
+  "rgba(0,0,0,0)",
+  "inherit",
+  "initial",
+  "unset",
+  "white",
+  "#fff",
+  "#ffffff",
+  "rgb(255,255,255)",
+]);
+
+function effectiveHighlightAncestor(textNode: Node, stopAt: HTMLElement): HTMLElement | null {
+  let cur: HTMLElement | null = textNode.parentElement;
+  while (cur && cur !== stopAt) {
+    const raw = cur.style?.backgroundColor;
+    if (raw) {
+      const c = raw.replace(/\s/g, "").toLowerCase();
+      return CLEAR_BG.has(c) ? null : cur;
+    }
+    cur = cur.parentElement;
+  }
+  return null;
+}
+
+function findMarkedYellow(root: HTMLElement | null): HTMLElement[] {
+  if (!root || typeof document === "undefined") return [];
+  const out: HTMLElement[] = [];
+  const seen = new Set<HTMLElement>();
+  root.querySelectorAll<HTMLElement>("[data-g]").forEach((group) => {
+    const walker = document.createTreeWalker(group, NodeFilter.SHOW_TEXT);
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      if (!node.textContent?.trim()) continue;
+      const hl = effectiveHighlightAncestor(node, group);
+      if (hl && !seen.has(hl)) {
+        seen.add(hl);
+        out.push(hl);
+      }
+    }
+  });
+  return out;
+}
+
+function isFollowingConnected(anchor: Node, target: Node): boolean {
+  const pos = anchor.compareDocumentPosition(target);
+  return !(pos & Node.DOCUMENT_POSITION_DISCONNECTED) && Boolean(pos & Node.DOCUMENT_POSITION_FOLLOWING);
+}
+
+function countYellowParts(marked: HTMLElement[]): number {
+  const seen = new Set<string>();
+  let count = 0;
+  for (const el of marked) {
+    const rid = el.closest("[data-r]")?.getAttribute("data-r");
+    const gid = el.closest("[data-g]")?.getAttribute("data-g");
+    if (rid && gid) {
+      const key = `${gid}:${rid}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+    }
+    count++;
+  }
+  return count;
+}
+
+export function DocEditor({ src, pending, onState, onYellowCount, ref }: Props) {
   const [view, setView] = useState<View | null>(null);
   const host = useRef<HTMLDivElement>(null);
   const dirty = useRef(false);
   const report = useRef(onState);
+  const reportYellow = useRef(onYellowCount);
   useEffect(() => {
     report.current = onState;
+    reportYellow.current = onYellowCount;
   });
 
   useEffect(() => {
@@ -106,6 +176,14 @@ export function DocEditor({ src, pending, onState, ref }: Props) {
   const [notice, setNotice] = useState("");
   const [fitWidth, setFitWidth] = useState(true);
   const [hostWidth, setHostWidth] = useState(0);
+  const [yellowCount, setYellowCount] = useState<number | null>(null);
+
+  function syncYellowCount() {
+    const n = countYellowParts(findMarkedYellow(host.current));
+    setYellowCount(n);
+    reportYellow.current?.(n);
+    return n;
+  }
 
   useEffect(() => {
     const el = host.current;
@@ -119,6 +197,35 @@ export function DocEditor({ src, pending, onState, ref }: Props) {
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!view) return;
+    const id = requestAnimationFrame(() => {
+      const n = countYellowParts(findMarkedYellow(host.current));
+      setYellowCount(n);
+      reportYellow.current?.(n);
+    });
+    return () => cancelAnimationFrame(id);
+  }, [view, tableOps]);
+
+  useEffect(() => {
+    const el = host.current;
+    if (!el) return;
+    let raf = 0;
+    const onInput = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        const n = countYellowParts(findMarkedYellow(host.current));
+        setYellowCount(n);
+        reportYellow.current?.(n);
+      });
+    };
+    el.addEventListener("input", onInput, true);
+    return () => {
+      cancelAnimationFrame(raf);
+      el.removeEventListener("input", onInput, true);
+    };
   }, []);
 
   const pageWidthMm = dim(view?.page.width) ?? 210;
@@ -229,19 +336,29 @@ export function DocEditor({ src, pending, onState, ref }: Props) {
     setNotice("");
   }
 
-  // Toolbar commands act on the text the person selected (the browser's own editing commands).
-  function command(name: "bold" | "italic" | "underline" | "unmark") {
+  function selectElement(el: HTMLElement) {
+    el.scrollIntoView({ block: "center", inline: "nearest" });
+    el.closest<HTMLElement>("[data-g]")?.focus({ preventScroll: true });
     const sel = window.getSelection();
-    const at = sel?.anchorNode;
-    const el = at && (at.nodeType === 1 ? (at as Element) : at.parentElement);
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+  }
+
+  // Toolbar commands act on the text the person selected (the browser's own editing commands).
+  function command(name: "bold" | "italic" | "underline" | "unmark"): boolean {
+    const sel = window.getSelection();
+    const node = sel?.anchorNode;
+    const el = node && (node.nodeType === 1 ? (node as Element) : node.parentElement);
     const group = el?.closest("[data-g]");
-    if (!sel || !group || !host.current?.contains(group)) return;
+    if (!sel || !group || !host.current?.contains(group)) return false;
     if (name === "unmark") {
       if (sel.isCollapsed) {
         // nothing selected: the whole piece of text the cursor is in (also when bold split it)
         const id = el?.closest("[data-r]")?.getAttribute("data-r");
         const all = id ? group.querySelectorAll(`[data-r="${CSS.escape(id)}"]`) : [];
-        if (!all.length) return;
+        if (!all.length) return false;
         const last = all[all.length - 1];
         const range = document.createRange();
         range.setStart(all[0], 0);
@@ -252,36 +369,138 @@ export function DocEditor({ src, pending, onState, ref }: Props) {
       document.execCommand("styleWithCSS", false, "true");
       document.execCommand("hiliteColor", false, "transparent");
       document.execCommand("styleWithCSS", false, "false");
-    } else document.execCommand(name);
+      dirty.current = true;
+      setNotice("");
+      syncYellowCount();
+      return true;
+    }
+    document.execCommand(name);
     dirty.current = true;
+    setNotice("");
+    return true;
   }
 
   // Jump to the next yellow part after the cursor, so none is missed.
   function nextYellow() {
-    const marked = Array.from(host.current?.querySelectorAll<HTMLElement>("[data-g] [style]") ?? []).filter((e) => {
-      const c = e.style.backgroundColor.replace(/\s/g, "");
-      return c && c !== "transparent" && c !== "rgba(0,0,0,0)" && e.textContent?.trim();
-    });
-    if (!marked.length) return;
+    const marked = findMarkedYellow(host.current);
+    setYellowCount(countYellowParts(marked));
+    reportYellow.current?.(countYellowParts(marked));
+    if (!marked.length) {
+      setNotice("No yellow parts left on the page.");
+      return;
+    }
+    setNotice("");
     const sel = window.getSelection();
-    const at = sel?.anchorNode ?? null;
-    const next =
-      marked.find((e) => at && !e.contains(at) && at.compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING) ?? marked[0];
-    next.scrollIntoView({ block: "center", inline: "nearest" });
-    next.closest<HTMLElement>("[data-g]")?.focus({ preventScroll: true }); // typing goes there
-    const range = document.createRange();
-    range.selectNodeContents(next);
-    sel?.removeAllRanges();
-    sel?.addRange(range);
+    const anchor = sel?.anchorNode ?? null;
+    const next = marked.find((e) => anchor && !e.contains(anchor) && isFollowingConnected(anchor, e)) ?? marked[0];
+    selectElement(next);
   }
 
-  const tool = "rounded border border-gray-300 bg-white px-2 py-1 text-sm hover:bg-gray-50";
+  // One-click human review step (Hard Rule 2): only clears the ONE yellow part the cursor is
+  // currently on, then jumps straight to the next remaining yellow part. Never bulk-clears.
+  function confirmAndNext() {
+    const marked = findMarkedYellow(host.current);
+    if (!marked.length) {
+      syncYellowCount();
+      setNotice("All yellow parts are cleared.");
+      return;
+    }
+    const sel = window.getSelection();
+    const anchor = sel?.anchorNode ?? null;
+    const current = anchor ? marked.find((e) => e === anchor || e.contains(anchor)) : null;
+    if (!current) {
+      // Not positioned on a yellow part yet: jump to the first one so the person inspects it first.
+      setNotice("Check this yellow part, then click Confirm & next again.");
+      selectElement(marked[0]);
+      return;
+    }
+    // Select the full run of the current yellow mark and clear only this one mark.
+    const rid = current.closest("[data-r]")?.getAttribute("data-r");
+    const group = current.closest("[data-g]");
+    if (rid && group) {
+      const all = group.querySelectorAll(`[data-r="${CSS.escape(rid)}"]`);
+      if (all.length) {
+        const range = document.createRange();
+        range.setStart(all[0], 0);
+        range.setEnd(all[all.length - 1], all[all.length - 1].childNodes.length);
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+      }
+    } else {
+      selectElement(current);
+    }
+    command("unmark");
+    const remaining = findMarkedYellow(host.current);
+    const remainingCount = countYellowParts(remaining);
+    setYellowCount(remainingCount);
+    reportYellow.current?.(remainingCount);
+    if (!remaining.length) {
+      setNotice("All yellow parts are cleared. Ready to save and finalise.");
+      return;
+    }
+    const next = remaining.find((e) => isFollowingConnected(current, e)) ?? remaining[0];
+    setNotice("");
+    selectElement(next);
+  }
+
+  const tool = "rounded border border-gray-300 bg-white px-2 py-1 text-xs font-medium text-gray-800 transition-colors hover:bg-gray-100";
   const keep = (e: React.MouseEvent) => e.preventDefault(); // keep the selection in the text
   const pendingKey = useMemo(() => JSON.stringify(pending ?? null), [pending]);
 
   return (
-    <div className="min-w-0 overflow-hidden rounded border bg-white">
-      <div className="flex flex-wrap items-center gap-1 border-b bg-gray-50 p-1.5" role="toolbar" aria-label="Formatting">
+    <div className="min-w-0 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-xs">
+      {/* Row 1: Review actions (yellow counter, Confirm & next, zoom) */}
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-200 bg-slate-50 px-2.5 py-2" role="toolbar" aria-label="Review controls">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {yellowCount !== null && (
+            <button
+              type="button"
+              onMouseDown={keep}
+              onClick={nextYellow}
+              title={yellowCount > 0 ? "Jump to next remaining yellow part" : "All yellow parts cleared"}
+              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ring-inset transition-colors ${
+                yellowCount > 0
+                  ? "bg-amber-100 text-amber-950 ring-amber-300 hover:bg-amber-200/80"
+                  : "bg-emerald-50 text-emerald-800 ring-emerald-200"
+              }`}
+            >
+              <span className={`h-2 w-2 rounded-full ${yellowCount > 0 ? "bg-amber-500" : "bg-emerald-500"}`} aria-hidden />
+              {yellowCount > 0 ? `${yellowCount} yellow left` : "0 yellow left · ready"}
+            </button>
+          )}
+          {yellowCount !== 0 && (
+            <button
+              type="button"
+              className="rounded-md bg-tmc px-2.5 py-1 text-xs font-semibold text-white shadow-xs transition-colors hover:bg-tmc-dark"
+              onMouseDown={keep}
+              onClick={confirmAndNext}
+              title="Clear yellow on the current item (after you inspect it) and jump to the next yellow part"
+            >
+              Confirm &amp; next
+            </button>
+          )}
+          <button type="button" className={tool} onMouseDown={keep} onClick={nextYellow}>
+            Next yellow
+          </button>
+          <button type="button" className={tool} onMouseDown={keep} onClick={() => command("unmark")} title="Remove the yellow mark of the selected text">
+            Remove yellow
+          </button>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            className={tool}
+            onMouseDown={keep}
+            onClick={() => setFitWidth((f) => !f)}
+            title="Switch between fitting the full page width and 100% A4 zoom"
+          >
+            {fitWidth ? "Zoom: Fit" : "Zoom: 100%"}
+          </button>
+        </div>
+      </div>
+
+      {/* Row 2: Text formatting and table tools */}
+      <div className="flex flex-wrap items-center gap-1 border-b border-gray-200 bg-gray-50/70 px-2.5 py-1.5" role="toolbar" aria-label="Formatting and table tools">
         <button type="button" className={`${tool} font-bold`} onMouseDown={keep} onClick={() => command("bold")} title="Bold (Ctrl+B)">
           B
         </button>
@@ -291,13 +510,7 @@ export function DocEditor({ src, pending, onState, ref }: Props) {
         <button type="button" className={`${tool} underline`} onMouseDown={keep} onClick={() => command("underline")} title="Underline (Ctrl+U)">
           U
         </button>
-        <button type="button" className={tool} onMouseDown={keep} onClick={() => command("unmark")} title="Remove the yellow mark of the selected text">
-          Remove yellow
-        </button>
-        <button type="button" className={tool} onMouseDown={keep} onClick={nextYellow}>
-          Next yellow part
-        </button>
-        <span className="mx-1 h-5 w-px bg-gray-300" aria-hidden />
+        <span className="mx-1 h-4 w-px bg-gray-300" aria-hidden />
         <button type="button" className={tool} onMouseDown={keep} onClick={() => resize(-1)} title="Smaller letters for the selected text">
           A−
         </button>
@@ -313,7 +526,7 @@ export function DocEditor({ src, pending, onState, ref }: Props) {
         <button type="button" className={tool} onMouseDown={keep} onClick={() => align("right")} title="Align the paragraph right">
           Right
         </button>
-        <span className="mx-1 h-5 w-px bg-gray-300" aria-hidden />
+        <span className="mx-1 h-4 w-px bg-gray-300" aria-hidden />
         <button type="button" className={tool} onMouseDown={keep} onClick={() => table("rowAbove")}>
           + Row above
         </button>
@@ -324,34 +537,25 @@ export function DocEditor({ src, pending, onState, ref }: Props) {
           Delete row
         </button>
         <button type="button" className={tool} onMouseDown={keep} onClick={() => table("colLeft")}>
-          + Column left
+          + Col left
         </button>
         <button type="button" className={tool} onMouseDown={keep} onClick={() => table("colRight")}>
-          + Column right
+          + Col right
         </button>
         <button type="button" className={tool} onMouseDown={keep} onClick={() => table("delCol")}>
-          Delete column
+          Delete col
         </button>
         <button type="button" className={tool} onMouseDown={keep} onClick={undoTable}>
-          Undo table change
-        </button>
-        <span className="mx-1 h-5 w-px bg-gray-300" aria-hidden />
-        <button
-          type="button"
-          className={tool}
-          onMouseDown={keep}
-          onClick={() => setFitWidth((f) => !f)}
-          title="Switch between fitting the full page width and 100% A4 zoom"
-        >
-          {fitWidth ? "Zoom: Fit" : "Zoom: 100%"}
+          Undo table
         </button>
         {notice && (
-          <span role="status" className="text-sm text-amber-800">
+          <span role="status" className="ml-2 text-xs font-medium text-amber-800">
             {notice}
           </span>
         )}
       </div>
-      <div ref={host} className="h-[75vh] overflow-auto bg-gray-100 p-3" style={{ scrollbarGutter: "stable" }}>
+
+      <div ref={host} className="h-[78vh] overflow-auto bg-slate-100 p-3" style={{ scrollbarGutter: "stable" }}>
         <div style={{ zoom: scale < 1 ? scale : undefined }}>
           <TablesContext value={tableOps}>
             {view && <Page key={pendingKey} view={view} pending={pending} />}

@@ -29,6 +29,7 @@ type Props = EditProps & {
 
 export function EditSection(p: Props) {
   const [state, setState] = useState<DocEditorState>("loading");
+  const [liveYellow, setLiveYellow] = useState<number | null>(null);
   const [accept, setAccept] = useState(false);
   const editor = useRef<DocEditorHandle>(null);
   const warnings = p.pending?.warnings ?? [];
@@ -55,17 +56,39 @@ export function EditSection(p: Props) {
     );
   }
 
+  const canSave = !p.disabled && state === "ready" && Boolean(p.metadata.productName.trim());
+
   return (
-    <section className="rounded-lg bg-white p-5 shadow-sm ring-1 ring-black/5">
-      {/* Open straight away: checking means editing in place (Willem 26/10, first live run). */}
-      <h2 className="font-semibold">Check and edit the document{p.pending ? " (your last edit)" : ""}</h2>
-      <p className="mt-1 text-sm text-gray-600">
-        Click in any text to change it; Enter starts a new line. Select text for bold, italic, underline or bigger and
-        smaller letters; click in a paragraph to align it; click in a table cell to add or delete rows and columns.
-        Check every yellow part and remove its yellow: nothing yellow can become Final. When you save, the neutralizer
-        checks the document again, also its layout (nothing over the TMC letterhead, nothing cut off), and makes the
-        Word file and the PDF.
-      </p>
+    <section className="rounded-lg bg-white p-4 shadow-sm ring-1 ring-black/5">
+      {/* Top workstation bar: status + Save & finalise always visible without scrolling */}
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-100 pb-3">
+        <div>
+          <h2 className="font-semibold text-gray-900">
+            Side-by-side check &amp; editor{p.pending ? " (your last edit)" : ""}
+          </h2>
+          <p className="text-xs text-gray-500">
+            Click any text on the right to edit. Use <strong>Confirm &amp; next</strong> to review and clear each yellow item one by one.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2.5">
+          {liveYellow !== null && liveYellow > 0 && (
+            <span className="text-xs font-medium text-amber-800">
+              {liveYellow} yellow part(s) still to clear
+            </span>
+          )}
+          {!p.metadata.productName.trim() && (
+            <span className="text-xs font-medium text-red-700">Enter Product name above first</span>
+          )}
+          <button
+            type="button"
+            disabled={!canSave}
+            onClick={() => p.act(saveAndFinalise)}
+            className="rounded-md bg-tmc px-4 py-2 text-sm font-semibold text-white shadow-xs transition-colors hover:bg-tmc-dark disabled:opacity-50"
+          >
+            Save and finalise: make Word + PDF
+          </button>
+        </div>
+      </div>
 
       {warnings.length > 0 && (
         <div className="mt-4 rounded-md bg-amber-50 p-3 text-sm text-amber-900 ring-1 ring-amber-300">
@@ -84,7 +107,7 @@ export function EditSection(p: Props) {
             ))}
           </ul>
           <label className="mt-3 flex items-center gap-2">
-            <input type="checkbox" checked={accept} onChange={(e) => setAccept(e.target.checked)} />
+            <input type="checkbox" checked={accept} onChange={(e) => setAccept(e.target.checked)} className="accent-tmc" />
             I checked these changes; they are correct
           </label>
           {p.pending && (
@@ -92,7 +115,7 @@ export function EditSection(p: Props) {
               type="button"
               disabled={p.disabled || !accept || !p.metadata.productName.trim()}
               onClick={() => p.act(() => finalise(p.pending!.edits, true))}
-              className="mt-3 rounded-md bg-tmc px-4 py-2 font-medium text-white hover:bg-tmc/90 disabled:opacity-50"
+              className="mt-3 rounded-md bg-tmc px-4 py-2 font-medium text-white hover:bg-tmc-dark disabled:opacity-50"
             >
               Finalise my last edit
             </button>
@@ -100,30 +123,45 @@ export function EditSection(p: Props) {
         </div>
       )}
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-2">
+      <div className="mt-3 grid gap-4 lg:grid-cols-2">
         <div className="min-w-0">
-          <h3 className="mb-1 text-sm font-semibold text-gray-700">Supplier original</h3>
+          <div className="mb-1.5 flex items-center justify-between">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Supplier original</h3>
+            {p.sourceUrl && (
+              <a href={p.sourceUrl} target="_blank" rel="noopener" className="text-xs text-tmc hover:underline">
+                Open in new tab
+              </a>
+            )}
+          </div>
           {p.sourceUrl ? (
-            <iframe src={p.sourceUrl} title="Supplier original (editor)" className="h-[80vh] w-full rounded border bg-white" />
+            <iframe src={p.sourceUrl} title="Supplier original (editor)" className="h-[82vh] w-full rounded-lg border border-gray-200 bg-white" />
           ) : (
-            <p className="rounded border bg-white p-4 text-sm text-gray-600">No original stored.</p>
+            <p className="rounded-lg border border-gray-200 bg-white p-4 text-sm text-gray-600">No original stored.</p>
           )}
         </div>
         <div className="min-w-0">
-          <h3 className="mb-1 text-sm font-semibold text-gray-700">
-            TMC document {state === "loading" ? "(loading…)" : state === "error" ? "(could not be opened)" : ""}
-          </h3>
-          <DocEditor ref={editor} src={p.viewUrl} pending={p.pending?.edits ?? null} onState={setState} />
+          <div className="mb-1.5 flex items-center justify-between">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+              TMC document {state === "loading" ? "(loading…)" : state === "error" ? "(could not be opened)" : "(editable)"}
+            </h3>
+          </div>
+          <DocEditor ref={editor} src={p.viewUrl} pending={p.pending?.edits ?? null} onState={setState} onYellowCount={setLiveYellow} />
         </div>
       </div>
-      <button
-        type="button"
-        disabled={p.disabled || state !== "ready" || !p.metadata.productName.trim()}
-        onClick={() => p.act(saveAndFinalise)}
-        className="mt-4 rounded-md bg-tmc px-4 py-2 font-medium text-white hover:bg-tmc/90 disabled:opacity-50"
-      >
-        Save and finalise: make Word + PDF
-      </button>
+
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-gray-100 pt-3">
+        <p className="text-xs text-gray-500">
+          When you save, the neutralizer re-checks the document and layout (nothing over the TMC letterhead, nothing cut off) before creating Word + PDF.
+        </p>
+        <button
+          type="button"
+          disabled={!canSave}
+          onClick={() => p.act(saveAndFinalise)}
+          className="rounded-md bg-tmc px-4 py-2 text-sm font-semibold text-white shadow-xs transition-colors hover:bg-tmc-dark disabled:opacity-50"
+        >
+          Save and finalise: make Word + PDF
+        </button>
+      </div>
     </section>
   );
 }

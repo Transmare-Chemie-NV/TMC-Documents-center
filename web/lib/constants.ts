@@ -18,6 +18,16 @@ export const API_JOB_STATES = ["waiting-input", "in-progress", "to-check", "read
 /** The engine route of each neutralise kind (label has its own form). */
 export const API_KIND_ROUTE = { "coa-neutralise": "coa", "sds-neutralise": "sds", "tds-neutralise": "tds", label: null } as const;
 
+// Internal document remarks & training flags (Phase 4c): never printed on outputs or returned by API v1.
+export const REMARK_CATEGORIES = [
+  "missing_rows",
+  "wrong_field",
+  "supplier_leak",
+  "layout",
+  "good_example",
+  "other",
+] as const;
+
 export type JobState = (typeof JOB_STATES)[number];
 export type Route = (typeof ROUTES)[number];
 export type DocType = (typeof DOC_TYPES)[number];
@@ -26,3 +36,14 @@ export type DocStatus = (typeof STATUSES)[number];
 export type LabelLanguage = (typeof LABEL_LANGUAGES)[number];
 export type ApiJobKind = (typeof API_JOB_KINDS)[number];
 export type ApiJobState = (typeof API_JOB_STATES)[number];
+export type RemarkCategory = (typeof REMARK_CATEGORIES)[number];
+
+export const REMARK_CATEGORY_LABELS: Record<RemarkCategory, string> = {
+  missing_rows: "Missing rows",
+  wrong_field: "Wrong batch / date / field",
+  supplier_leak: "Supplier leak",
+  layout: "Layout / formatting",
+  good_example: "Good example",
+  other: "Other",
+};
+

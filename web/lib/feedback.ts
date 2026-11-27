@@ -3,7 +3,10 @@
 import "server-only";
 import { and, desc, eq, gte, inArray, isNotNull, sql } from "drizzle-orm";
 import type { Db } from "./db";
-import { documents, feedback, jobs } from "./db/schema";
+import { documentRemarks, documents, feedback, jobs } from "./db/schema";
+import { listRemarksForFeedback } from "./documents/remarks";
+
+export { listRemarksForFeedback };
 
 export type Period = { from: Date };
 
@@ -16,7 +19,7 @@ export function periodFromDays(days: number): Period {
 export async function feedbackSummary(db: Db, p: Period) {
   const count = async (q: Promise<{ n: number }[]>) => (await q)[0]?.n ?? 0;
   const n = sql<number>`count(*)::int`;
-  const [drafts, finalViaEngine, rejected, failedJobs, corrected, confirmed] = await Promise.all([
+  const [drafts, finalViaEngine, rejected, failedJobs, corrected, confirmed, remarks, trainingFlagged] = await Promise.all([
     count(db.select({ n }).from(documents).where(and(isNotNull(documents.jobId), gte(documents.createdAt, p.from)))),
     count(
       db
@@ -28,6 +31,13 @@ export async function feedbackSummary(db: Db, p: Period) {
     count(db.select({ n }).from(jobs).where(and(eq(jobs.state, "failed"), gte(jobs.createdAt, p.from)))),
     count(db.select({ n }).from(feedback).where(and(eq(feedback.kind, "corrected"), gte(feedback.at, p.from)))),
     count(db.select({ n }).from(feedback).where(and(eq(feedback.kind, "confirmed"), gte(feedback.at, p.from)))),
+    count(db.select({ n }).from(documentRemarks).where(gte(documentRemarks.createdAt, p.from))),
+    count(
+      db
+        .select({ n })
+        .from(documentRemarks)
+        .where(and(eq(documentRemarks.trainingFlag, true), gte(documentRemarks.createdAt, p.from))),
+    ),
   ]);
   const checkedParts = corrected + confirmed;
   return {
@@ -38,6 +48,8 @@ export async function feedbackSummary(db: Db, p: Period) {
     corrected,
     confirmed,
     correctedShare: checkedParts ? Math.round((corrected / checkedParts) * 100) : null,
+    remarks,
+    trainingFlagged,
   };
 }
 
@@ -91,10 +103,15 @@ export async function failedJobs(db: Db, p: Period, limit = 50) {
     .limit(limit);
 }
 
+const FORMULA_TRIGGER = /^[\s\u00A0]*[=+\-@|]/;
+
 const csvCell = (v: unknown) => {
   let s = v instanceof Date ? v.toISOString() : String(v ?? "");
-  // A cell starting with = + - @ is a formula in Excel: neutralise it (CSV injection).
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  // Flatten CR/LF/TAB to spaces so multiline remarks cannot break out into new rows or trigger
+  // line-2 formulas in CSV importers, and neutralise any cell whose first non-space character is
+  // a spreadsheet formula trigger (= + - @ |) (SEC-01).
+  s = s.replace(/\r\n?|\n/g, " ").replace(/\t/g, " ");
+  if (FORMULA_TRIGGER.test(s)) s = `'${s}`;
   return `"${s.replace(/"/g, '""')}"`;
 };
 

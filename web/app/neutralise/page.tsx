@@ -51,7 +51,7 @@ export default async function NeutralisePage() {
           All jobs
         </Link>
       </div>
-      {open && <AutoRefresh seconds={10} />}
+      {open && <AutoRefresh seconds={5} />}
       <JobsTable rows={rows} />
     </PageShell>
   );
