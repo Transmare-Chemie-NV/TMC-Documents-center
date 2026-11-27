@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { createPgliteDb, type Db } from "./db";
-import { documents, feedback, jobs } from "./db/schema";
+import { documents, documentRemarks, feedback, jobs } from "./db/schema";
 import { newUploadKey } from "./files";
 import { failedJobs, feedbackLines, feedbackSummary, periodFromDays, toCsv, topCorrections } from "./feedback";
 
@@ -24,12 +24,26 @@ beforeEach(async () => {
     { actor: "kars@x", documentId: d.id, kind: "confirmed", partId: "y3", before: "OK", after: "OK" },
     { actor: "kars@x", documentId: d.id, kind: "rejected", reason: "Assay missing" },
   ]);
+  await db.insert(documentRemarks).values([
+    { documentId: d.id, actor: "stijn@x", remark: "Missed row 4 on scan", trainingFlag: true, category: "missing_rows" },
+    { documentId: d.id, actor: "sigi@x", remark: "Looks clean", trainingFlag: false, category: "good_example" },
+  ]);
 });
 
 describe("feedback overview", () => {
   it("summarises the period", async () => {
     const s = await feedbackSummary(db, periodFromDays(30));
-    expect(s).toMatchObject({ drafts: 1, finalViaEngine: 0, rejected: 1, failedJobs: 1, corrected: 3, confirmed: 1, correctedShare: 75 });
+    expect(s).toMatchObject({
+      drafts: 1,
+      finalViaEngine: 0,
+      rejected: 1,
+      failedJobs: 1,
+      corrected: 3,
+      confirmed: 1,
+      correctedShare: 75,
+      remarks: 2,
+      trainingFlagged: 1,
+    });
   });
 
   it("groups the same misreading, whatever the case or spaces", async () => {
@@ -45,8 +59,26 @@ describe("feedback overview", () => {
     expect((await failedJobs(db, periodFromDays(30)))[0].file?.filename).toBe("letter.pdf");
   });
 
-  it("CSV export cannot inject formulas into Excel", () => {
-    const csv = toCsv([{ a: "=HYPERLINK(\"x\")", b: "+1", c: 'say "hi"' }], ["a", "b", "c"]);
-    expect(csv).toBe('a;b;c\r\n"\'=HYPERLINK(""x"")";"\'+1";"say ""hi"""');
+  it("CSV export cannot inject formulas into Excel (including leading whitespace and multiline remarks)", () => {
+    const csv = toCsv(
+      [
+        {
+          a: '=HYPERLINK("x")',
+          b: "+1",
+          c: 'say "hi"',
+          d: ' =HYPERLINK("evil")',
+          e: "\u00A0+1",
+          f: "\t=1+1",
+          g: "\n=1+1",
+          h: "Row 4\n=HYPERLINK(\"https://evil.example\")\r\n;=cmd|'/C calc'!A0",
+          i: "|cmd",
+        },
+      ],
+      ["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+    );
+    expect(csv).toBe(
+      'a;b;c;d;e;f;g;h;i\r\n' +
+        `"'=HYPERLINK(""x"")";"'+1";"say ""hi""";"' =HYPERLINK(""evil"")";"'\u00A0+1";"' =1+1";"' =1+1";"Row 4 =HYPERLINK(""https://evil.example"") ;=cmd|'/C calc'!A0";"'|cmd"`,
+    );
   });
 });

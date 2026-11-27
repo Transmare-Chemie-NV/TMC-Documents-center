@@ -208,3 +208,14 @@ export async function countToCheck(db: Db) {
   const [{ n }] = await db.select({ n: sql<number>`count(*)::int` }).from(documents).where(eq(documents.status, "To check"));
   return n;
 }
+
+/** Counts per status for the Library quick-filter tabs (single GROUP BY query). */
+export async function documentStatusCounts(db: Db): Promise<Record<DocStatus, number>> {
+  const rows = await db
+    .select({ status: documents.status, n: sql<number>`count(*)::int` })
+    .from(documents)
+    .groupBy(documents.status);
+  const out: Record<DocStatus, number> = { Draft: 0, "To check": 0, Final: 0, Superseded: 0, Rejected: 0 };
+  for (const r of rows) out[r.status] = r.n;
+  return out;
+}

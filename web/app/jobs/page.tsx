@@ -24,7 +24,7 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
         </Link>
       </div>
       <Notice ok={sp.ok} error={sp.error} />
-      {open && <AutoRefresh seconds={10} />}
+      {open && <AutoRefresh seconds={5} />}
 
       <JobsTable rows={rows} />
     </PageShell>

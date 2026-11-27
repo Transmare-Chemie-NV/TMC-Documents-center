@@ -18,10 +18,10 @@ import {
 } from "drizzle-orm/pg-core";
 
 import type { Edits } from "../documents/edits";
-import { API_JOB_KINDS, DOC_TYPES, ENTITIES, JOB_KINDS, JOB_STATES, ROLES, ROUTES, STATUSES } from "../constants";
+import { API_JOB_KINDS, DOC_TYPES, ENTITIES, JOB_KINDS, JOB_STATES, REMARK_CATEGORIES, ROLES, ROUTES, STATUSES } from "../constants";
 
-export { API_JOB_KINDS, DOC_TYPES, ENTITIES, JOB_KINDS, JOB_STATES, ROLES, ROUTES, STATUSES };
-export type { DocStatus, DocType, Entity, JobState, Route } from "../constants";
+export { API_JOB_KINDS, DOC_TYPES, ENTITIES, JOB_KINDS, JOB_STATES, REMARK_CATEGORIES, ROLES, ROUTES, STATUSES };
+export type { DocStatus, DocType, Entity, JobState, RemarkCategory, Route } from "../constants";
 
 export const docType = pgEnum("doc_type", DOC_TYPES);
 export const entityCode = pgEnum("entity_code", ENTITIES);
@@ -31,6 +31,7 @@ export const jobState = pgEnum("job_state", JOB_STATES);
 export const jobKind = pgEnum("job_kind", JOB_KINDS);
 export const route = pgEnum("route", ROUTES);
 export const apiJobKind = pgEnum("api_job_kind", API_JOB_KINDS);
+export const remarkCategory = pgEnum("remark_category", REMARK_CATEGORIES);
 
 // Entity records the engine prints (BRIEF 6, engine/entity.example.json). Only an admin edits
 // them; a job for an entity without a record is refused: an address is never invented.
@@ -318,7 +319,30 @@ export const feedback = pgTable(
   (t) => [index("feedback_at").on(t.at)],
 );
 
+// Internal document remarks & training flags (Phase 4c). Never printed on TMC outputs or returned by API v1.
+export const documentRemarks = pgTable(
+  "document_remarks",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    documentId: uuid("document_id")
+      .notNull()
+      .references(() => documents.id),
+    actor: text("actor").notNull(),
+    remark: text("remark").notNull(),
+    trainingFlag: boolean("training_flag").notNull().default(false),
+    category: remarkCategory("category").notNull().default("other"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("document_remarks_doc_created").on(t.documentId, t.createdAt),
+    index("document_remarks_training_created").on(t.trainingFlag, t.createdAt),
+    index("document_remarks_actor_created").on(t.actor, t.createdAt),
+    check("document_remarks_length", sql`char_length(trim(${t.remark})) BETWEEN 3 AND 1000`),
+  ],
+);
+
 export type Document = typeof documents.$inferSelect;
+export type DocumentRemark = typeof documentRemarks.$inferSelect;
 export type Feedback = typeof feedback.$inferSelect;
 export type User = typeof users.$inferSelect;
 export type Job = typeof jobs.$inferSelect;
